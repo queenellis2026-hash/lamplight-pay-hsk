@@ -27,7 +27,9 @@ Lamplight Pay is a minimal, auditable settlement layer for agent-to-agent work:
    delivery hash (the deliverable itself lives off-chain, content-addressed).
 4. **Settle (on-chain).** The requester releases the funds — or, if the
    deadline passes with no delivery, reclaims them. Either side can raise a
-   dispute after delivery; the requester resolves it (release or refund).
+   dispute after delivery; whoever the job names as arbiter resolves it
+   (release or refund) — the requester by default, or an optional
+   third-party arbiter set at creation.
 5. **Receipt (off-chain).** Both sides keep a hash-stable settlement receipt:
    who paid whom, how much, for what, on which chain, with the tx hash as proof.
 
@@ -89,7 +91,7 @@ scripts/
   demo.py               3 end-to-end scenarios on a local EVM, writes receipts
   deploy_hsk_testnet.py deploy to HSK testnet (chain 133) — see below
 tests/
-  test_flow.py          23 tests: happy path, timeout refund, stranger guard,
+  test_flow.py          41 tests: happy path, timeout refund, stranger guard,
                     quote, review-window lifecycle, review-window cap (30
                     days) + boundary, fee/no-bool tokens,
                     cancelUnaccepted, mint access control, blocklisted
@@ -142,9 +144,13 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   Payments & A2A Settlement. Mainnet deployment is still pending (rules:
   no mainnet = forfeits demo selection; winners must be on mainnet to
   claim the prize) — the Build can still be edited before judging.
-- **Payer-as-arbiter.** Disputes are resolved by the payer in this version.
-  That is documented in the contract, not hidden. A production version needs a
-  third-party arbiter or DAO vote.
+- **Payer-as-arbiter, now optional.** Disputes are resolved by the payer
+  when no arbiter is set — the demo default. Since round 4 (Oct 27,
+  2026), `createJob` takes an optional third-party arbiter address: when
+  one is set, only the arbiter resolves disputes (it may be neither the
+  payer nor the agent), and the payer cannot resolve. If the arbiter goes
+  silent, the dispute still times out to the agent, so no arbiter can
+  lock funds forever.
 - **Review window (fixed Oct 27, 2026 after independent review).** Three
   reviewers (Claude, Grok, ChatGPT) all found the same gap: `reviewWindow`
   was stored but never enforced, so a silent payer could lock funds forever
@@ -159,11 +165,16 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   legitimate payer choice (instant settlement). The agent's claim is
   strict (`>`): at the exact boundary second the payer's dispute (`<=`)
   still wins, so a last-second dispute can never lose a race to the
-  agent's release. Funding stores what actually arrived (balance
-  before/after, so fee-on-transfer tokens cannot make the escrow
-  insolvent), token moves use SafeERC20-style calls (USDT-style no-bool
-  tokens work), and `MockUSDC` mint is owner-gated. 21 tests cover every
-  new path. Full verbatim findings: `reviews-2026-10-27.md`. Note: the
+  agent's release. `claimWindows()` returns the exact claim and
+  dispute-timeout timestamps so callers never re-compute them. Funding
+  stores what actually arrived (balance before/after, so fee-on-transfer
+  tokens cannot make the escrow insolvent), token moves use SafeERC20-style
+  calls (USDT-style no-bool tokens work), a failing payout leg credits a
+  pull balance instead of stranding the job, and `MockUSDC` mint is
+  owner-gated. 41 tests cover every new path, including the previously
+  untested ones (release while Disputed, both resolve directions, early
+  timeout, cancel, window of 0, reentrancy through a hook token).
+  Full verbatim findings: `reviews-2026-10-27.md`. Note: the
   contracts deployed on HSK testnet (above) are the PRE-fix version —
   redeploy is needed before demo selection for the on-chain code to match
   this source.

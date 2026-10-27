@@ -6,9 +6,12 @@ pragma solidity ^0.8.24;
 /// Settlement track). A payer (human or agent) funds a job in an ERC-20
 /// stablecoin; the worker agent accepts, delivers (hash of the deliverable),
 /// and the payer releases. If the agent never delivers by the deadline the
-/// payer can reclaim. Either side can raise a dispute; the payer resolves it
-/// (release or refund) — the honest-minimum arbiter for a hackathon demo,
-/// documented as a limitation in the README, not hidden.
+/// payer can reclaim. Either side can raise a dispute; whoever the job
+/// names as arbiter resolves it — the payer by default, or an optional
+/// third-party arbiter set at creation (the arbiter may be neither the
+/// payer nor the agent). If the arbiter is set and goes silent, the dispute
+/// still times out to the agent via settleDisputeTimeout(), so no arbiter
+/// can lock funds forever either.
 /// @dev Review-window lifecycle (REVISED Oct 27, 2026 after independent
 /// review by Claude, Grok and ChatGPT — see reviews-2026-10-27.md):
 ///   - submitDelivery records deliveredAt. The payer may release at any
@@ -20,10 +23,10 @@ pragma solidity ^0.8.24;
 ///   - If the payer stays silent past the window and no dispute was raised,
 ///     the AGENT may call release() and claim the funds — a silent payer
 ///     can no longer lock the funds forever.
-///   - A disputed job must be resolved by the payer within the dispute
-///     period (review window + DISPUTE_PERIOD, 7 days). After that, either
-///     party may call settleDisputeTimeout(), which releases to the agent:
-///     delivered work gets paid unless the payer acts in time. No
+///   - A disputed job must be resolved by the job's arbiter within the
+///     dispute period (review window + DISPUTE_PERIOD, 7 days). After that,
+///     either party may call settleDisputeTimeout(), which releases to the
+///     agent: delivered work gets paid unless the arbiter acts in time. No
 ///     arbitrator in v1 — that is a stated limitation, not an oversight.
 /// @dev Funding measures what actually arrived: createJob compares the
 ///   escrow's token balance before and after transferFrom and stores the
@@ -62,6 +65,7 @@ contract AgentEscrow {
         bytes32 deliveryHash;
         string metadataURI; // off-chain job spec / quote id
         uint256 deliveredAt; // timestamp of submitDelivery; 0 until delivered
+        address arbiter; // optional third-party dispute resolver; address(0) = the payer
     }
 
     /// @dev Dispute period after the review window ends: the payer must
@@ -87,7 +91,7 @@ contract AgentEscrow {
     ///   job's token varies; a recipient may hold credits in several.
     mapping(address => mapping(address => uint256)) public pendingWithdrawals;
 
-    event JobCreated(uint256 indexed jobId, address indexed payer, address indexed agent, address token, uint256 amount, uint256 deadline, string metadataURI);
+    event JobCreated(uint256 indexed jobId, address indexed payer, address indexed agent, address token, uint256 amount, uint256 deadline, string metadataURI, address arbiter);
     event JobAccepted(uint256 indexed jobId, address indexed agent);
     event DeliverySubmitted(uint256 indexed jobId, bytes32 deliveryHash);
     event JobReleased(uint256 indexed jobId, address indexed agent, uint256 amount);
@@ -122,16 +126,23 @@ contract AgentEscrow {
     /// @dev The review window is capped at MAX_REVIEW_WINDOW (30 days): an
     ///   uncapped window would let the payer delay (or, near 2**256 - 1,
     ///   overflow) the agent's claim indefinitely.
+    /// @dev `arbiter` is optional: address(0) means the payer resolves
+    ///   disputes, as before. A set arbiter must be a third party — neither
+    ///   the payer nor the agent — and then only the arbiter may resolve.
+    /// @param arbiter Optional third-party dispute resolver (address(0) = payer).
     function createJob(
         address agent,
         address token,
         uint256 amount,
         uint256 deadlineSeconds,
         uint256 reviewWindowSeconds,
-        string calldata metadataURI
+        string calldata metadataURI,
+        address arbiter
     ) external nonReentrant returns (uint256 jobId) {
         require(agent != address(0) && token != address(0), "zero address");
         require(agent != msg.sender, "payer cannot be agent");
+        require(arbiter != msg.sender, "arbiter cannot be payer");
+        require(arbiter != agent, "arbiter cannot be agent");
         require(amount > 0, "amount zero");
         require(deadlineSeconds > 0, "deadline zero");
         require(reviewWindowSeconds <= MAX_REVIEW_WINDOW, "review window too long");
@@ -151,9 +162,10 @@ contract AgentEscrow {
             state: State.Created,
             deliveryHash: bytes32(0),
             metadataURI: metadataURI,
-            deliveredAt: 0
+            deliveredAt: 0,
+            arbiter: arbiter
         });
-        emit JobCreated(jobId, msg.sender, agent, token, received, block.timestamp + deadlineSeconds, metadataURI);
+        emit JobCreated(jobId, msg.sender, agent, token, received, block.timestamp + deadlineSeconds, metadataURI, arbiter);
     }
 
     function acceptJob(uint256 jobId) external onlyAgent(jobId) {
@@ -251,15 +263,24 @@ contract AgentEscrow {
         emit DisputeRaised(jobId, msg.sender);
     }
 
-    /// @notice Payer resolves a dispute: true = pay the agent, false = refund.
-    /// Honest limitation: the payer is the arbiter in this demo version.
-    /// A production version would use a third-party arbiter or DAO vote.
+    /// @notice The job's arbiter resolves a dispute: true = pay the agent,
+    ///   false = refund. Who the arbiter is depends on the job: the optional
+    ///   third-party arbiter set at creation, or the payer when none was
+    ///   set (the demo default — the payer-as-arbiter limitation, kept for
+    ///   no-arbiter jobs). The arbiter resolves; it cannot raise a dispute
+    ///   (only the parties may) and cannot release (only payer/agent may).
     /// @dev Must be called within the dispute period (review window +
     ///   DISPUTE_PERIOD after delivery); after that, settleDisputeTimeout()
-    ///   is the only exit, so a dispute cannot lock funds forever.
-    function resolveDispute(uint256 jobId, bool releaseToAgent) external onlyPayer(jobId) nonReentrant {
+    ///   is the only exit, so a dispute cannot lock funds forever — even
+    ///   if the arbiter goes silent.
+    function resolveDispute(uint256 jobId, bool releaseToAgent) external nonReentrant {
         Job storage job = jobs[jobId];
         require(job.state == State.Disputed, "not disputed");
+        if (job.arbiter != address(0)) {
+            require(msg.sender == job.arbiter, "not arbiter");
+        } else {
+            require(msg.sender == job.payer, "not payer");
+        }
         require(
             block.timestamp <= job.deliveredAt + job.reviewWindow + DISPUTE_PERIOD,
             "dispute period ended"
@@ -351,6 +372,22 @@ contract AgentEscrow {
         );
         require(success, "funding failed");
         require(data.length == 0 || abi.decode(data, (bool)), "funding failed");
+    }
+
+    /// @notice The two timestamps that bound the agent's claim and the
+    ///   dispute, so callers never re-compute them.
+    /// @dev agentClaimAt is the last second of the review window: the
+    ///   agent's claim is strict (>), so it may claim from agentClaimAt
+    ///   + 1. A dispute may be resolved up to disputeTimeoutAt (<=) and
+    ///   times out after it (>). Only meaningful once the job is delivered
+    ///   (deliveredAt != 0); before delivery it returns the window
+    ///   offsets from 0.
+    /// @return agentClaimAt deliveredAt + reviewWindow
+    /// @return disputeTimeoutAt deliveredAt + reviewWindow + DISPUTE_PERIOD
+    function claimWindows(uint256 jobId) external view returns (uint256 agentClaimAt, uint256 disputeTimeoutAt) {
+        Job storage job = jobs[jobId];
+        agentClaimAt = job.deliveredAt + job.reviewWindow;
+        disputeTimeoutAt = agentClaimAt + DISPUTE_PERIOD;
     }
 
     function getJob(uint256 jobId) external view returns (Job memory) {

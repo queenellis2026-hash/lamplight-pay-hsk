@@ -26,6 +26,7 @@ from web3.providers.eth_tester import EthereumTesterProvider  # noqa: E402
 from a2a.quote import new_quote, quote_expired  # noqa: E402
 
 ONE = 1_000_000
+ZERO = "0x" + "0" * 40  # the zero address: no third-party arbiter (payer resolves)
 
 
 @pytest.fixture(scope="module")
@@ -49,12 +50,13 @@ def env():
     fee = deploy("FeeToken")
     nobool = deploy("NoBoolToken")
     blocklist = deploy("BlocklistToken")
-    for token in (musdc, fee, nobool, blocklist):
+    hook = deploy("HookToken")
+    for token in (musdc, fee, nobool, blocklist, hook):
         token.functions.mint(payer, 10_000 * ONE).transact({"from": payer})
         token.functions.approve(escrow.address, 10_000 * ONE).transact({"from": payer})
     return {"w3": w3, "tester": tester, "payer": payer, "agent": agent,
             "musdc": musdc, "escrow": escrow, "fee": fee, "nobool": nobool,
-            "blocklist": blocklist}
+            "blocklist": blocklist, "hook": hook}
 
 
 def _travel(env, seconds):
@@ -64,12 +66,14 @@ def _travel(env, seconds):
     env["tester"].mine_blocks(1)
 
 
-def _make_delivered(env, amount=10 * ONE, deadline=3600, window=600, token=None):
-    """Fund + accept + deliver a job; returns its job id."""
+def _make_delivered(env, amount=10 * ONE, deadline=3600, window=600, token=None, arbiter=None):
+    """Fund + accept + deliver a job; returns its job id.
+    arbiter defaults to the zero address (payer-as-arbiter, as before)."""
     escrow = env["escrow"]
     payer, agent = env["payer"], env["agent"]
     token = token or env["musdc"].address
-    escrow.functions.createJob(agent, token, amount, deadline, window, "ipfs://t").transact({"from": payer})
+    escrow.functions.createJob(agent, token, amount, deadline, window, "ipfs://t",
+                               arbiter or ZERO).transact({"from": payer})
     jid = escrow.functions.jobCount().call() - 1
     escrow.functions.acceptJob(jid).transact({"from": agent})
     escrow.functions.submitDelivery(jid, Web3.keccak(text="deliverable")).transact({"from": agent})
@@ -84,7 +88,7 @@ def test_happy_path_release(env):
     w3, payer, agent = env["w3"], env["payer"], env["agent"]
     escrow, musdc = env["escrow"], env["musdc"]
     before = musdc.functions.balanceOf(agent).call()
-    escrow.functions.createJob(agent, musdc.address, 10 * ONE, 3600, 600, "ipfs://t").transact({"from": payer})
+    escrow.functions.createJob(agent, musdc.address, 10 * ONE, 3600, 600, "ipfs://t", ZERO).transact({"from": payer})
     jid = escrow.functions.jobCount().call() - 1
     escrow.functions.acceptJob(jid).transact({"from": agent})
     escrow.functions.submitDelivery(jid, Web3.keccak(text="deliverable")).transact({"from": agent})
@@ -97,7 +101,7 @@ def test_timeout_refund(env):
     w3, payer, agent = env["w3"], env["payer"], env["agent"]
     escrow, musdc = env["escrow"], env["musdc"]
     before = musdc.functions.balanceOf(payer).call()
-    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 5, 0, "ipfs://t").transact({"from": payer})
+    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 5, 0, "ipfs://t", ZERO).transact({"from": payer})
     jid = escrow.functions.jobCount().call() - 1
     _travel(env, 100)  # past the 5s deadline, on the chain's own clock
     escrow.functions.refundAfterDeadline(jid).transact({"from": payer})
@@ -186,7 +190,7 @@ def test_fee_on_transfer_token(env):
     payer, agent = env["payer"], env["agent"]
     payer_before = fee.functions.balanceOf(payer).call()
     agent_before = fee.functions.balanceOf(agent).call()
-    escrow.functions.createJob(agent, fee.address, 100 * ONE, 3600, 600, "ipfs://t").transact({"from": payer})
+    escrow.functions.createJob(agent, fee.address, 100 * ONE, 3600, 600, "ipfs://t", ZERO).transact({"from": payer})
     jid = escrow.functions.jobCount().call() - 1
     job = escrow.functions.getJob(jid).call()
     assert job[3] == 99 * ONE  # stored amount is what arrived, not 100
@@ -221,7 +225,7 @@ def test_cancel_unaccepted_after_deadline(env):
     escrow, musdc = env["escrow"], env["musdc"]
     payer, agent = env["payer"], env["agent"]
     before = musdc.functions.balanceOf(payer).call()
-    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 5, 0, "ipfs://t").transact({"from": payer})
+    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 5, 0, "ipfs://t", ZERO).transact({"from": payer})
     jid = escrow.functions.jobCount().call() - 1
     _travel(env, 100)  # past the 5s deadline; agent never accepted
     escrow.functions.cancelUnaccepted(jid).transact({"from": payer})
@@ -232,7 +236,7 @@ def test_cancel_unaccepted_after_deadline(env):
 def test_cancel_unaccepted_before_deadline_reverts(env):
     escrow, musdc = env["escrow"], env["musdc"]
     payer, agent = env["payer"], env["agent"]
-    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600, 0, "ipfs://t").transact({"from": payer})
+    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600, 0, "ipfs://t", ZERO).transact({"from": payer})
     jid = escrow.functions.jobCount().call() - 1
     with pytest.raises(TransactionFailed, match="deadline not passed"):
         escrow.functions.cancelUnaccepted(jid).transact({"from": payer})
@@ -241,7 +245,7 @@ def test_cancel_unaccepted_before_deadline_reverts(env):
 def test_cancel_unaccepted_after_accept_reverts(env):
     escrow, musdc = env["escrow"], env["musdc"]
     payer, agent = env["payer"], env["agent"]
-    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 5, 0, "ipfs://t").transact({"from": payer})
+    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 5, 0, "ipfs://t", ZERO).transact({"from": payer})
     jid = escrow.functions.jobCount().call() - 1
     escrow.functions.acceptJob(jid).transact({"from": agent})
     _travel(env, 100)
@@ -274,12 +278,12 @@ def test_create_job_too_large_review_window_reverts(env):
     assert max_window == 30 * 24 * 3600
     with pytest.raises(TransactionFailed, match="review window too long"):
         escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600,
-                                   max_window + 1, "ipfs://t").transact({"from": payer})
+                                   max_window + 1, "ipfs://t", ZERO).transact({"from": payer})
     # Claude's exact repro: a near-2**256 window would overflow
     # deliveredAt + reviewWindow and lock the funds forever.
     with pytest.raises(TransactionFailed, match="review window too long"):
         escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600,
-                                   2**256 - 1, "ipfs://t").transact({"from": payer})
+                                   2**256 - 1, "ipfs://t", ZERO).transact({"from": payer})
 
 
 def test_create_job_max_review_window_ok(env):
@@ -290,7 +294,7 @@ def test_create_job_max_review_window_ok(env):
     max_window = escrow.functions.MAX_REVIEW_WINDOW().call()
     before = escrow.functions.jobCount().call()
     escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600,
-                               max_window, "ipfs://t").transact({"from": payer})
+                               max_window, "ipfs://t", ZERO).transact({"from": payer})
     assert escrow.functions.jobCount().call() == before + 1
     job = escrow.functions.getJob(before).call()
     assert job[5] == max_window  # reviewWindow stored as given
@@ -399,6 +403,287 @@ def test_quote_hash_stable_and_expiry():
     assert q["quote_hash"].startswith("0x") and len(q["quote_hash"]) == 66
     assert not quote_expired(q)
     assert quote_expired(q, now=q["expires_at"] + 1)
+
+
+# ---- Round 4 (Oct 27, 2026): missing coverage (Claude improvement 3),
+# ---- the claim-windows view helper (Grok improvement 2), the optional
+# ---- per-job arbiter (Grok + Claude feature), and the cold-transfer
+# ---- margin lock (Grok improvement 3, HSK leg) ----
+
+def test_agent_release_while_disputed_reverts(env):
+    """Claude improvement 3: while a job is Disputed, neither party may
+    release — the dispute must be resolved (or time out) first."""
+    escrow = env["escrow"]
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    escrow.functions.raiseDispute(jid).transact({"from": env["payer"]})
+    assert _state(env, jid) == 3  # State.Disputed
+    with pytest.raises(TransactionFailed, match="not delivered"):
+        escrow.functions.release(jid).transact({"from": env["agent"]})
+    with pytest.raises(TransactionFailed, match="not delivered"):
+        escrow.functions.release(jid).transact({"from": env["payer"]})
+
+
+def test_resolve_dispute_true_pays_agent(env):
+    """Claude improvement 3: resolving a dispute in the agent's favour
+    pays the agent in full and ends the job Released."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    agent = env["agent"]
+    before = musdc.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    escrow.functions.raiseDispute(jid).transact({"from": env["payer"]})
+    escrow.functions.resolveDispute(jid, True).transact({"from": env["payer"]})
+    assert musdc.functions.balanceOf(agent).call() == before + 10 * ONE
+    assert _state(env, jid) == 4  # State.Released
+
+
+def test_resolve_dispute_false_refunds_payer(env):
+    """Claude improvement 3: resolving a dispute against the agent
+    refunds the payer in full and ends the job Refunded."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    payer = env["payer"]
+    before = musdc.functions.balanceOf(payer).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    escrow.functions.raiseDispute(jid).transact({"from": payer})
+    escrow.functions.resolveDispute(jid, False).transact({"from": payer})
+    assert musdc.functions.balanceOf(payer).call() == before
+    assert _state(env, jid) == 5  # State.Refunded
+
+
+def test_settle_dispute_timeout_before_period_reverts(env):
+    """Claude improvement 3: the timeout exit opens only AFTER the
+    dispute period ends — an early attempt reverts."""
+    escrow = env["escrow"]
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    escrow.functions.raiseDispute(jid).transact({"from": env["payer"]})
+    _travel(env, 600)  # review window over, dispute period not yet
+    with pytest.raises(TransactionFailed, match="dispute period not ended"):
+        escrow.functions.settleDisputeTimeout(jid).transact({"from": env["agent"]})
+
+
+def test_cancel_before_accept_refunds(env):
+    """Claude improvement 3: the payer may cancel a still-Created job
+    and is refunded in full; the job ends Cancelled."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    payer, agent = env["payer"], env["agent"]
+    before = musdc.functions.balanceOf(payer).call()
+    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600, 0, "ipfs://t", ZERO).transact({"from": payer})
+    jid = escrow.functions.jobCount().call() - 1
+    escrow.functions.cancel(jid).transact({"from": payer})
+    assert musdc.functions.balanceOf(payer).call() == before
+    assert _state(env, jid) == 6  # State.Cancelled
+
+
+def test_cancel_after_accept_reverts(env):
+    """Claude improvement 3: once the agent has accepted, the plain
+    cancel is closed — the payer must use the deadline paths instead."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    payer, agent = env["payer"], env["agent"]
+    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600, 0, "ipfs://t", ZERO).transact({"from": payer})
+    jid = escrow.functions.jobCount().call() - 1
+    escrow.functions.acceptJob(jid).transact({"from": agent})
+    with pytest.raises(TransactionFailed, match="only before accept"):
+        escrow.functions.cancel(jid).transact({"from": payer})
+
+
+def test_window_zero_agent_claims_next_block(env):
+    """Claude improvement 3: a window of 0 means instant settlement —
+    the very next block is already past deliveredAt + 0, so the agent
+    may claim immediately."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    agent = env["agent"]
+    before = musdc.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=0)
+    escrow.functions.release(jid).transact({"from": agent})
+    assert musdc.functions.balanceOf(agent).call() == before + 10 * ONE
+    assert _state(env, jid) == 4  # State.Released
+
+
+def test_window_zero_dispute_after_delivery_second_reverts(env):
+    """Claude improvement 3: with a window of 0 the payer may only
+    dispute in the delivery second itself — one block later the window
+    has already ended."""
+    escrow = env["escrow"]
+    jid = _make_delivered(env, amount=10 * ONE, window=0)
+    with pytest.raises(TransactionFailed, match="review window ended"):
+        escrow.functions.raiseDispute(jid).transact({"from": env["payer"]})
+
+
+def test_reentrancy_through_hook_token(env):
+    """Claude improvement 3: a token whose transfer() calls back into
+    the escrow must not drain or brick the job. The inner release() hits
+    the nonReentrant guard (proven by the recorded returndata carrying
+    "reentrant"), the payout leg fails, the job still reaches Released
+    with a pull credit — and the credit pays out once the hook is
+    disarmed."""
+    escrow, hook = env["escrow"], env["hook"]
+    payer, agent = env["payer"], env["agent"]
+    agent_before = hook.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, token=hook.address)
+    # Arm the hook: on every transfer, call release(jid) on the escrow.
+    calldata = escrow.encode_abi("release", args=[jid])
+    hook.functions.setHook(escrow.address, calldata).transact({"from": payer})
+    # The payout leg triggers the hook; the inner release hits the guard.
+    escrow.functions.release(jid).transact({"from": payer})
+    assert _state(env, jid) == 4  # State.Released — terminal, not stranded
+    assert escrow.functions.pendingWithdrawals(hook.address, agent).call() == 10 * ONE
+    assert hook.functions.balanceOf(escrow.address).call() == 10 * ONE
+    assert hook.functions.lastHookOk().call() is False
+    assert b"reentrant" in bytes(hook.functions.lastHookReturndata().call())
+    # Disarm the hook; the credit withdraws cleanly.
+    hook.functions.setHook(ZERO, b"").transact({"from": payer})
+    escrow.functions.withdraw(hook.address).transact({"from": agent})
+    assert hook.functions.balanceOf(agent).call() == agent_before + 10 * ONE
+    assert escrow.functions.pendingWithdrawals(hook.address, agent).call() == 0
+    assert hook.functions.balanceOf(escrow.address).call() == 0
+
+
+def test_claim_windows_helper_matches_behavior(env):
+    """Grok improvement 2: claimWindows() returns the exact timestamps
+    the contract itself enforces — the agent's claim boundary and the
+    dispute timeout — and the behaviour at those boundaries matches
+    them exactly."""
+    escrow = env["escrow"]
+    dispute_period = escrow.functions.DISPUTE_PERIOD().call()
+    # Half 1: the agent's claim boundary.
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    job = escrow.functions.getJob(jid).call()
+    delivered_at = job[9]
+    agent_claim_at, dispute_timeout_at = escrow.functions.claimWindows(jid).call()
+    assert agent_claim_at == delivered_at + 600
+    assert dispute_timeout_at == delivered_at + 600 + dispute_period
+    _travel(env, 599)  # the release tx lands exactly at agentClaimAt
+    with pytest.raises(TransactionFailed, match="review window not ended"):
+        escrow.functions.release(jid).transact({"from": env["agent"]})
+    _travel(env, 1)  # one second past the boundary: the claim succeeds
+    escrow.functions.release(jid).transact({"from": env["agent"]})
+    assert _state(env, jid) == 4  # State.Released
+    # Half 2: the dispute-timeout boundary, on a disputed job.
+    jid2 = _make_delivered(env, amount=10 * ONE, window=600)
+    job2 = escrow.functions.getJob(jid2).call()
+    delivered_at2 = job2[9]
+    _, dispute_timeout_at2 = escrow.functions.claimWindows(jid2).call()
+    assert dispute_timeout_at2 == delivered_at2 + 600 + dispute_period
+    escrow.functions.raiseDispute(jid2).transact({"from": env["payer"]})
+    _travel(env, 600 + dispute_period - 2)  # settle tx lands exactly at the timeout
+    with pytest.raises(TransactionFailed, match="dispute period not ended"):
+        escrow.functions.settleDisputeTimeout(jid2).transact({"from": env["agent"]})
+    _travel(env, 1)  # one second past: the timeout settles to the agent
+    escrow.functions.settleDisputeTimeout(jid2).transact({"from": env["agent"]})
+    assert _state(env, jid2) == 4  # State.Released
+
+
+def test_claim_windows_before_delivery_returns_offsets(env):
+    """The helper is only meaningful once delivered (deliveredAt != 0);
+    before delivery it returns the window offsets from 0, as documented."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    payer, agent = env["payer"], env["agent"]
+    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600, 600, "ipfs://t", ZERO).transact({"from": payer})
+    jid = escrow.functions.jobCount().call() - 1
+    agent_claim_at, dispute_timeout_at = escrow.functions.claimWindows(jid).call()
+    dispute_period = escrow.functions.DISPUTE_PERIOD().call()
+    assert agent_claim_at == 600
+    assert dispute_timeout_at == 600 + dispute_period
+
+
+def test_arbiter_resolves_dispute_to_agent(env):
+    """Grok + Claude feature: a job with a third-party arbiter is
+    resolved by the arbiter, not the payer — here in the agent's favour."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    arbiter = env["w3"].eth.accounts[3]
+    agent = env["agent"]
+    before = musdc.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600, arbiter=arbiter)
+    assert env["escrow"].functions.getJob(jid).call()[10] == arbiter
+    escrow.functions.raiseDispute(jid).transact({"from": env["payer"]})
+    escrow.functions.resolveDispute(jid, True).transact({"from": arbiter})
+    assert musdc.functions.balanceOf(agent).call() == before + 10 * ONE
+    assert _state(env, jid) == 4  # State.Released
+
+
+def test_arbiter_resolves_dispute_to_payer(env):
+    """Same arbiter path, the other direction: the arbiter refunds the
+    payer for work it judges undelivered."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    arbiter = env["w3"].eth.accounts[3]
+    payer = env["payer"]
+    before = musdc.functions.balanceOf(payer).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600, arbiter=arbiter)
+    escrow.functions.raiseDispute(jid).transact({"from": payer})
+    escrow.functions.resolveDispute(jid, False).transact({"from": arbiter})
+    assert musdc.functions.balanceOf(payer).call() == before
+    assert _state(env, jid) == 5  # State.Refunded
+
+
+def test_payer_cannot_resolve_when_arbiter_set(env):
+    """When an arbiter is set, the payer loses the resolve power it has
+    on no-arbiter jobs — and the arbiter cannot raise a dispute or
+    release either; those stay with the parties."""
+    escrow = env["escrow"]
+    arbiter = env["w3"].eth.accounts[3]
+    jid = _make_delivered(env, amount=10 * ONE, window=600, arbiter=arbiter)
+    escrow.functions.raiseDispute(jid).transact({"from": env["payer"]})
+    with pytest.raises(TransactionFailed, match="not arbiter"):
+        escrow.functions.resolveDispute(jid, True).transact({"from": env["payer"]})
+    with pytest.raises(TransactionFailed, match="not arbiter"):
+        escrow.functions.resolveDispute(jid, False).transact({"from": env["agent"]})
+
+
+def test_arbiter_cannot_raise_dispute_or_release(env):
+    """The arbiter resolves only. Raising a dispute and releasing stay
+    with the parties."""
+    escrow = env["escrow"]
+    arbiter = env["w3"].eth.accounts[3]
+    jid = _make_delivered(env, amount=10 * ONE, window=600, arbiter=arbiter)
+    with pytest.raises(TransactionFailed, match="not a party"):
+        escrow.functions.raiseDispute(jid).transact({"from": arbiter})
+    with pytest.raises(TransactionFailed, match="not payer"):
+        escrow.functions.release(jid).transact({"from": arbiter})
+
+
+def test_arbiter_cannot_be_payer_or_agent(env):
+    """The arbiter must be a third party: it cannot be the payer or the
+    agent at creation."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    payer, agent = env["payer"], env["agent"]
+    with pytest.raises(TransactionFailed, match="arbiter cannot be payer"):
+        escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600, 600,
+                                   "ipfs://t", payer).transact({"from": payer})
+    with pytest.raises(TransactionFailed, match="arbiter cannot be agent"):
+        escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600, 600,
+                                   "ipfs://t", agent).transact({"from": payer})
+
+
+def test_no_arbiter_job_payer_still_resolves(env):
+    """No-arbiter jobs behave exactly as before: the arbiter field is
+    the zero address and the payer resolves disputes."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    agent = env["agent"]
+    before = musdc.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    assert escrow.functions.getJob(jid).call()[10] == ZERO
+    escrow.functions.raiseDispute(jid).transact({"from": env["payer"]})
+    escrow.functions.resolveDispute(jid, True).transact({"from": env["payer"]})
+    assert musdc.functions.balanceOf(agent).call() == before + 10 * ONE
+    assert _state(env, jid) == 4  # State.Released
+
+
+def test_cold_transfer_to_fresh_agent_balance(env):
+    """Grok improvement 3 (HSK): the ERC-20 payout leg to an agent whose
+    token balance is zero writes a fresh storage slot (cold) — the
+    release must still pay directly, never credit."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    payer = env["payer"]
+    fresh = env["w3"].eth.accounts[4]
+    assert musdc.functions.balanceOf(fresh).call() == 0
+    escrow.functions.createJob(fresh, musdc.address, 10 * ONE, 3600, 600,
+                               "ipfs://t", ZERO).transact({"from": payer})
+    jid = escrow.functions.jobCount().call() - 1
+    escrow.functions.acceptJob(jid).transact({"from": fresh})
+    escrow.functions.submitDelivery(jid, Web3.keccak(text="deliverable")).transact({"from": fresh})
+    escrow.functions.release(jid).transact({"from": payer})
+    assert musdc.functions.balanceOf(fresh).call() == 10 * ONE
+    assert escrow.functions.pendingWithdrawals(musdc.address, fresh).call() == 0
+    assert _state(env, jid) == 4  # State.Released
 
 
 if __name__ == "__main__":

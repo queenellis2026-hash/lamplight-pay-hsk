@@ -146,3 +146,54 @@ no HSP code runs in this build yet.
 
 - `README.md` · `SUBMISSION.md` · `STATUS.md` (this file)
 - `contracts/`, `a2a/`, `scripts/`, `tests/`, `build/`, `demo-receipts/`
+
+## Round 4 — "make it better" — DONE Oct 27, 2026 (evening)
+
+The reviewers' improvement + feature suggestions from the round-2
+re-review (Grok + Claude, updated brief rules 7+8), implemented
+properly per the standing grant ("make it better ellis not the easy way do
+what you think is best").
+
+- **Missing coverage (Claude improvement 3):** tests added for every
+  previously untested path — agent release while Disputed (reverts),
+  resolveDispute(true) pays the agent, resolveDispute(false) refunds
+  the payer, early settleDisputeTimeout (reverts), cancel before accept
+  (refunds) and after accept (reverts), window of 0 (agent claims in
+  the next block; a dispute one block later reverts), and reentrancy
+  through a hook token (new test-only `HookToken`, whose transfer()
+  calls back into the escrow: the inner release hits the nonReentrant
+  guard — proven by the recorded returndata carrying "reentrant" — the
+  payout leg fails, the job still reaches Released with a pull credit,
+  and the credit pays out once the hook is disarmed). One design fix
+  during the run: the hook first returned false by reverting, which
+  rolled back its own outcome recording — it now runs before the
+  balance movement and returns false without reverting, so the
+  recording survives and _tryTransfer still treats it as a failed
+  payout.
+- **View helper (Grok improvement 2):** `claimWindows(jobId)` returns
+  (agentClaimAt, disputeTimeoutAt) = (deliveredAt + reviewWindow,
+  deliveredAt + reviewWindow + DISPUTE_PERIOD), so callers never
+  re-compute them. Tested against the contract's actual behaviour at
+  both boundaries (claim at the boundary reverts, +1s succeeds; timeout
+  at the boundary reverts, +1s succeeds) and before delivery (returns
+  the window offsets from 0, as documented).
+- **Per-job third-party arbiter (Grok + Claude feature):** `createJob`
+  takes an optional arbiter address (address(0) = the payer, as
+  before). A set arbiter must be neither payer nor agent, and then only
+  the arbiter may resolveDispute — the payer cannot, and the arbiter
+  cannot raise a dispute or release. If the arbiter goes silent, the
+  dispute still times out to the agent. No-arbiter jobs behave exactly
+  as before (existing resolve tests pass unchanged). The demo passes
+  address(0) (no arbiter) in all three scenarios.
+- **Cold transfer (Grok improvement 3, HSK leg):** a release to an
+  agent whose token balance is zero (fresh storage slot, cold) pays
+  directly, never credits.
+- **Tests: 41 passed, 0 failed** (23 before + 18 new). Demo re-run:
+  3/3 scenarios + stranger guard pass, final balances unchanged
+  (payer 9920 / agent 80 / escrow 0) — the v3 video is NOT stale (the
+  demo never uses the new arbiter path). Contract bytecode grew to
+  19,919 B (was 18,680 B after round 3).
+- NOT done here: the testnet deployment is still the PRE-fix contract
+  (now four fix rounds behind source) — redeploy + Build edit are
+  separate steps. No GitHub push and no Build edit were made in
+  this task.
