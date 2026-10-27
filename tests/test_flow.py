@@ -260,6 +260,78 @@ def test_mockusdc_mint_only_owner(env):
     assert musdc.functions.balanceOf(payer).call() == before + 1 * ONE
 
 
+# ---- Re-review fixes (Oct 27, 2026): review-window cap + boundary ----
+
+def test_create_job_too_large_review_window_reverts(env):
+    """Claude Medium (re-review): reviewWindowSeconds is capped at
+    MAX_REVIEW_WINDOW (30 days). A larger window reverts, so a silent
+    payer can no longer delay (or overflow) the agent's claim."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    payer, agent = env["payer"], env["agent"]
+    max_window = escrow.functions.MAX_REVIEW_WINDOW().call()
+    assert max_window == 30 * 24 * 3600
+    with pytest.raises(TransactionFailed, match="review window too long"):
+        escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600,
+                                   max_window + 1, "ipfs://t").transact({"from": payer})
+    # Claude's exact repro: a near-2**256 window would overflow
+    # deliveredAt + reviewWindow and lock the funds forever.
+    with pytest.raises(TransactionFailed, match="review window too long"):
+        escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600,
+                                   2**256 - 1, "ipfs://t").transact({"from": payer})
+
+
+def test_create_job_max_review_window_ok(env):
+    """The cap is inclusive: a window of exactly MAX_REVIEW_WINDOW is
+    accepted."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    payer, agent = env["payer"], env["agent"]
+    max_window = escrow.functions.MAX_REVIEW_WINDOW().call()
+    before = escrow.functions.jobCount().call()
+    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600,
+                               max_window, "ipfs://t").transact({"from": payer})
+    assert escrow.functions.jobCount().call() == before + 1
+    job = escrow.functions.getJob(before).call()
+    assert job[5] == max_window  # reviewWindow stored as given
+    assert _state(env, before) == 0  # State.Created
+
+
+def test_agent_claim_at_exact_window_end_reverts(env):
+    """Claude Low (re-review): at exactly deliveredAt + reviewWindow the
+    agent's claim is now strict (>), so it reverts — the payer's
+    last-second dispute cannot lose a race to the agent's release.
+    Note: a tx sent after _travel(env, 599) executes at deliveredAt + 600
+    (eth-tester mines the tx block 1s after the travel block)."""
+    escrow = env["escrow"]
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    _travel(env, 599)  # the release tx lands at exactly deliveredAt + 600
+    with pytest.raises(TransactionFailed, match="review window not ended"):
+        escrow.functions.release(jid).transact({"from": env["agent"]})
+
+
+def test_dispute_at_exact_window_end_succeeds(env):
+    """The other half of the boundary: at exactly deliveredAt + reviewWindow
+    the payer's dispute (<=) still succeeds, so the window's last second
+    belongs to the payer."""
+    escrow = env["escrow"]
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    _travel(env, 599)  # the dispute tx lands at exactly deliveredAt + 600
+    escrow.functions.raiseDispute(jid).transact({"from": env["payer"]})
+    assert _state(env, jid) == 3  # State.Disputed
+
+
+def test_agent_claim_just_after_window_end_succeeds(env):
+    """The strict (>) claim still lets the agent claim one second after
+    the window ends — the fix removes the race without delaying the claim."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    agent = env["agent"]
+    before = musdc.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    _travel(env, 600)  # the release tx lands at deliveredAt + 601
+    escrow.functions.release(jid).transact({"from": agent})
+    assert musdc.functions.balanceOf(agent).call() == before + 10 * ONE
+    assert _state(env, jid) == 4  # State.Released
+
+
 def test_quote_hash_stable_and_expiry():
     q = new_quote(service="s", price=100, token="0x" + "0" * 40, token_symbol="mUSDC",
                   network="HSKChain Testnet", chain_id=133, escrow="0x" + "0" * 40,

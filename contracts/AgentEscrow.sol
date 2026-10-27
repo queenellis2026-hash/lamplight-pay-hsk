@@ -59,6 +59,16 @@ contract AgentEscrow {
     ///   releases to the agent. 7 days, matching the Arc escrow's window.
     uint256 public constant DISPUTE_PERIOD = 7 days;
 
+    /// @dev Upper bound on the review window a payer may set in createJob.
+    ///   Without a cap, a huge window (or one near 2**256 - 1, which overflows
+    ///   deliveredAt + reviewWindow) would let a silent payer lock the agent's
+    ///   claim indefinitely — the exact lock the review window was added to
+    ///   prevent. 30 days is the longest review a job may carry.
+    ///   No lower bound is set: a window of 0 is a legitimate payer choice
+    ///   (instant settlement, no review period); it helps the agent, not
+    ///   hurts them, so there is nothing to protect with a floor.
+    uint256 public constant MAX_REVIEW_WINDOW = 30 days;
+
     uint256 public jobCount;
     mapping(uint256 => Job) public jobs;
 
@@ -92,6 +102,9 @@ contract AgentEscrow {
     /// @notice Fund a job. Payer must have approved `amount` of `token` first.
     /// @dev The stored amount is what actually arrived (balance before/after),
     ///   so a fee-on-transfer token funds the job with the net amount only.
+    /// @dev The review window is capped at MAX_REVIEW_WINDOW (30 days): an
+    ///   uncapped window would let the payer delay (or, near 2**256 - 1,
+    ///   overflow) the agent's claim indefinitely.
     function createJob(
         address agent,
         address token,
@@ -104,6 +117,7 @@ contract AgentEscrow {
         require(agent != msg.sender, "payer cannot be agent");
         require(amount > 0, "amount zero");
         require(deadlineSeconds > 0, "deadline zero");
+        require(reviewWindowSeconds <= MAX_REVIEW_WINDOW, "review window too long");
         uint256 balanceBefore = IERC20(token).balanceOf(address(this));
         _safeTransferFrom(token, msg.sender, amount);
         uint256 received = IERC20(token).balanceOf(address(this)) - balanceBefore;
@@ -149,12 +163,16 @@ contract AgentEscrow {
     ///   arbiter during the review window). After the review window ends
     ///   (deliveredAt + reviewWindow) with no dispute raised, the AGENT may
     ///   also release and claim — a silent payer cannot lock funds forever.
+    ///   The agent's claim is STRICT (block.timestamp > deliveredAt +
+    ///   reviewWindow): at the exact boundary second the payer's dispute
+    ///   (raiseDispute, <=) still wins, so a last-second dispute can never
+    ///   lose a race to the agent's release.
     function release(uint256 jobId) external nonReentrant {
         Job storage job = jobs[jobId];
         require(job.state == State.Delivered, "not delivered");
         if (msg.sender == job.agent) {
             require(
-                block.timestamp >= job.deliveredAt + job.reviewWindow,
+                block.timestamp > job.deliveredAt + job.reviewWindow,
                 "review window not ended"
             );
         } else {

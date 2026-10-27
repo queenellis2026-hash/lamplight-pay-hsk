@@ -82,8 +82,9 @@ scripts/
   demo.py               3 end-to-end scenarios on a local EVM, writes receipts
   deploy_hsk_testnet.py deploy to HSK testnet (chain 133) — see below
 tests/
-  test_flow.py          16 tests: happy path, timeout refund, stranger guard,
-                    quote, review-window lifecycle, fee/no-bool tokens,
+  test_flow.py          21 tests: happy path, timeout refund, stranger guard,
+                    quote, review-window lifecycle, review-window cap (30
+                    days) + boundary, fee/no-bool tokens,
                     cancelUnaccepted, mint access control
 demo-receipts/          quote + receipts produced by the demo run
 ```
@@ -92,9 +93,9 @@ demo-receipts/          quote + receipts produced by the demo run
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install web3 eth-tester py-solc-x py-evm pytest
-.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 16,567 B
+.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 16,788 B
 .venv/bin/python scripts/demo.py      # 3 scenarios, all pass
-.venv/bin/python -m pytest tests/ -v  # 16 passed
+.venv/bin/python -m pytest tests/ -v  # 21 passed
 ```
 
 Demo result (local EVM, real tx hashes in `demo-receipts/`):
@@ -141,14 +142,21 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   arbitrates during the window; a dispute may only be raised inside it; if
   the payer stays silent past it, the agent may call `release()` and claim;
   a disputed job must be resolved within the window + 7 days, after which
-  `settleDisputeTimeout()` releases to the agent. Funding stores what
-  actually arrived (balance before/after, so fee-on-transfer tokens cannot
-  make the escrow insolvent), token moves use SafeERC20-style calls (USDT-
-  style no-bool tokens work), and `MockUSDC` mint is owner-gated. 16 tests
-  cover every new path. Full verbatim findings:
-  `reviews-2026-10-27.md`. Note: the contracts deployed on HSK testnet
-  (above) are the PRE-fix version — redeploy is needed before demo
-  selection for the on-chain code to match this source.
+  `settleDisputeTimeout()` releases to the agent. The window itself is
+  capped at `MAX_REVIEW_WINDOW` (30 days) in `createJob` — an uncapped
+  window would let a payer delay (or, near 2**256 − 1, overflow) the
+  agent's claim indefinitely; no floor is set, since a 0 window is a
+  legitimate payer choice (instant settlement). The agent's claim is
+  strict (`>`): at the exact boundary second the payer's dispute (`<=`)
+  still wins, so a last-second dispute can never lose a race to the
+  agent's release. Funding stores what actually arrived (balance
+  before/after, so fee-on-transfer tokens cannot make the escrow
+  insolvent), token moves use SafeERC20-style calls (USDT-style no-bool
+  tokens work), and `MockUSDC` mint is owner-gated. 21 tests cover every
+  new path. Full verbatim findings: `reviews-2026-10-27.md`. Note: the
+  contracts deployed on HSK testnet (above) are the PRE-fix version —
+  redeploy is needed before demo selection for the on-chain code to match
+  this source.
 - **Eligibility verified:** the hackathon is **online and global**. The
   organiser's Eventbrite listing says "Online event", "An online hackathon in
   India", and "inviting global developers". "Mumbai Edition" is branding, not a

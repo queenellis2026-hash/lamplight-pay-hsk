@@ -43,6 +43,44 @@ Independent review (Claude, Grok, ChatGPT — full verbatim in
   identical), but it shows the pre-fix contract's behaviour; re-record
   after redeploy if the video must match the current source.
 
+## Re-review fix (Oct 27, 2026)
+
+A re-review of the fixed contracts (Claude + Grok, fresh wipe, one shot;
+ChatGPT's leg was blocked by its Free-plan file-upload limit until
+~Oct 28) found 2 new HSK findings, both fixed in source + tests:
+- **Medium — reviewWindow had no upper bound.** `createJob` stored it
+  unchecked, so a huge window (or one near 2**256 − 1, which overflows
+  `deliveredAt + reviewWindow`) would let a silent payer lock the
+  agent's claim indefinitely — the exact lock the review window was
+  added to prevent. Fixed: `MAX_REVIEW_WINDOW = 30 days` (public
+  constant) and `require(reviewWindowSeconds <= MAX_REVIEW_WINDOW,
+  "review window too long")` in `createJob`. No floor was added: a 0
+  window is a legitimate payer choice (instant settlement — it helps
+  the agent, not hurts them), and the existing tests use window 0 for
+  the deadline/cancel paths. New revert string: "review window too
+  long". Tests: a window of 30 days + 1 reverts, a 2**256 − 1 window
+  reverts (Claude's exact repro), and exactly 30 days is accepted.
+- **Low — boundary overlap at exactly deliveredAt + reviewWindow.**
+  `raiseDispute` used `<=` while the agent branch of `release` used
+  `>=`, so at the boundary second both calls were valid and the
+  payer's last-second dispute could lose a race to the agent's
+  release. Fixed: the agent's claim is now strict (`>`), the dispute
+  stays `<=` — the window's last second belongs to the payer. Tests:
+  at the exact boundary the agent's claim reverts and the payer's
+  dispute succeeds; one second later the agent's claim succeeds.
+  (Boundary timing was calibrated against eth-tester: a tx sent after
+  travelling N seconds executes at +N+1, so the boundary tx travels
+  599 for a 600s window.)
+- Verification: `pytest` 21 passed, 0 failed (16 + 5 new); demo 3/3 +
+  stranger guard pass with identical final balances (payer 9920 /
+  agent 80 / escrow 0). Receipts B and C are byte-identical to the
+  pre-fix run; receipt A differs only by its fresh quote (new id/nonce
+  each run, as always). The v3 video is therefore NOT visibly stale.
+- NOT done here: the testnet deployment is still the PRE-fix contract
+  (now two fix rounds behind source) — redeploy + Build edit are
+  separate steps. No GitHub push and no Build edit were made in this
+  task.
+
 ## HSP (HashKey Settlement Protocol)
 
 The track is defined around HSP's Payment Mandate + Gateway. The HSP sandbox
