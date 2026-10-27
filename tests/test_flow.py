@@ -51,12 +51,13 @@ def env():
     nobool = deploy("NoBoolToken")
     blocklist = deploy("BlocklistToken")
     hook = deploy("HookToken")
-    for token in (musdc, fee, nobool, blocklist, hook):
+    malformed = deploy("MalformedReturnToken")
+    for token in (musdc, fee, nobool, blocklist, hook, malformed):
         token.functions.mint(payer, 10_000 * ONE).transact({"from": payer})
         token.functions.approve(escrow.address, 10_000 * ONE).transact({"from": payer})
     return {"w3": w3, "tester": tester, "payer": payer, "agent": agent,
             "musdc": musdc, "escrow": escrow, "fee": fee, "nobool": nobool,
-            "blocklist": blocklist, "hook": hook}
+            "blocklist": blocklist, "hook": hook, "malformed": malformed}
 
 
 def _travel(env, seconds):
@@ -572,17 +573,18 @@ def test_claim_windows_helper_matches_behavior(env):
     assert _state(env, jid2) == 4  # State.Released
 
 
-def test_claim_windows_before_delivery_returns_offsets(env):
-    """The helper is only meaningful once delivered (deliveredAt != 0);
-    before delivery it returns the window offsets from 0, as documented."""
+def test_claim_windows_before_delivery_returns_zero(env):
+    """Claude Low (round 5): claimWindows() returns (0, 0) before
+    delivery. The old behavior returned the window offsets from 0
+    (600, 600 + 7d), which look like 1970 timestamps that have already
+    passed — a UI or agent could wrongly conclude the claim is open."""
     escrow, musdc = env["escrow"], env["musdc"]
     payer, agent = env["payer"], env["agent"]
     escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600, 600, "ipfs://t", ZERO).transact({"from": payer})
     jid = escrow.functions.jobCount().call() - 1
     agent_claim_at, dispute_timeout_at = escrow.functions.claimWindows(jid).call()
-    dispute_period = escrow.functions.DISPUTE_PERIOD().call()
-    assert agent_claim_at == 600
-    assert dispute_timeout_at == 600 + dispute_period
+    assert agent_claim_at == 0
+    assert dispute_timeout_at == 0
 
 
 def test_arbiter_resolves_dispute_to_agent(env):
@@ -684,6 +686,95 @@ def test_cold_transfer_to_fresh_agent_balance(env):
     assert musdc.functions.balanceOf(fresh).call() == 10 * ONE
     assert escrow.functions.pendingWithdrawals(musdc.address, fresh).call() == 0
     assert _state(env, jid) == 4  # State.Released
+
+
+# ---- Round 5 (Oct 27, 2026): Claude round-4 findings + improvements ----
+
+def test_zero_address_agent_rejected_with_own_message(env):
+    """Grok improvement 2 (round 5): the agent zero-address guard is now
+    explicit and symmetric with the token check, with its own message —
+    a zero agent can no longer hide behind the shared "zero address"."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    payer, agent = env["payer"], env["agent"]
+    with pytest.raises(TransactionFailed, match="zero address agent"):
+        escrow.functions.createJob(ZERO, musdc.address, 5 * ONE, 3600, 600,
+                                   "ipfs://t", ZERO).transact({"from": payer})
+    with pytest.raises(TransactionFailed, match="zero address$"):
+        escrow.functions.createJob(agent, ZERO, 5 * ONE, 3600, 600,
+                                   "ipfs://t", ZERO).transact({"from": payer})
+
+
+@pytest.mark.parametrize("mode", [0, 1, 2])
+def test_malformed_return_payout_credits_instead_of_stranding(env, mode):
+    """Claude Low (round 5): _tryTransfer used abi.decode on the full
+    returndata, so a token returning 32 bytes with value 2 (mode 0), a
+    1-byte return (mode 1), or huge returndata (mode 2) made abi.decode
+    revert or the copy run out of gas — and release / resolveDispute /
+    settleDisputeTimeout then reverted forever, stranding the job. Now
+    the returndata is inspected with a bounded copy (at most 32 bytes):
+    any malformed return is a failed payout and the job is credited."""
+    escrow, bad = env["escrow"], env["malformed"]
+    payer, agent = env["payer"], env["agent"]
+    bad.functions.setMode(3).transact({"from": payer})  # well-behaved for funding
+    before = bad.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600, token=bad.address)
+    bad.functions.setMode(mode).transact({"from": payer})
+    escrow.functions.release(jid).transact({"from": payer})
+    assert _state(env, jid) == 4  # State.Released — not stranded
+    assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 10 * ONE
+    # the malformed transfer moved no funds, so the agent's balance is unchanged
+    assert bad.functions.balanceOf(agent).call() == before
+    # once the token behaves again, the credit pays out in full
+    bad.functions.setMode(3).transact({"from": payer})
+    escrow.functions.withdraw(bad.address).transact({"from": agent})
+    assert bad.functions.balanceOf(agent).call() == before + 10 * ONE
+    assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 0
+
+
+def _hook_calldata(env, fn_name, jid):
+    """Calldata for a HookToken hook that calls `fn_name(jid)` on the
+    escrow from the token's address (so it fails access control)."""
+    selector = Web3.keccak(text=f"{fn_name}(uint256)")[:4]
+    return selector + jid.to_bytes(32, "big")
+
+
+def test_hook_calling_raise_dispute_cannot_brick_release(env):
+    """Claude improvement (round 5): cross-function reentrancy. The hook
+    fires during release()'s payout transfer and calls raiseDispute()
+    on the same job. The inner call fails (the token is not a party),
+    the transfer fails, and the payout is credited — the settlement
+    still completes and the job reaches Released."""
+    escrow, hook = env["escrow"], env["hook"]
+    payer, agent = env["payer"], env["agent"]
+    jid = _make_delivered(env, amount=10 * ONE, window=600, token=hook.address)
+    hook.functions.setHook(escrow.address, _hook_calldata(env, "raiseDispute", jid)).transact({"from": payer})
+    escrow.functions.release(jid).transact({"from": payer})
+    assert _state(env, jid) == 4  # State.Released
+    assert escrow.functions.pendingWithdrawals(hook.address, agent).call() == 10 * ONE
+    assert hook.functions.lastHookOk().call() is False
+    assert b"not a party" in bytes(hook.functions.lastHookReturndata().call())
+    # disarm the hook and the credit pays out
+    hook.functions.setHook(ZERO, b"").transact({"from": payer})
+    escrow.functions.withdraw(hook.address).transact({"from": agent})
+    assert escrow.functions.pendingWithdrawals(hook.address, agent).call() == 0
+
+
+def test_hook_calling_accept_job_cannot_brick_release(env):
+    """Same cross-function shape, the other entry point: the hook calls
+    acceptJob() during release()'s payout transfer. The inner call fails
+    (the token is not the agent), the payout credits, the job settles."""
+    escrow, hook = env["escrow"], env["hook"]
+    payer, agent = env["payer"], env["agent"]
+    jid = _make_delivered(env, amount=10 * ONE, window=600, token=hook.address)
+    hook.functions.setHook(escrow.address, _hook_calldata(env, "acceptJob", jid)).transact({"from": payer})
+    escrow.functions.release(jid).transact({"from": payer})
+    assert _state(env, jid) == 4  # State.Released
+    assert escrow.functions.pendingWithdrawals(hook.address, agent).call() == 10 * ONE
+    assert hook.functions.lastHookOk().call() is False
+    assert b"not agent" in bytes(hook.functions.lastHookReturndata().call())
+    hook.functions.setHook(ZERO, b"").transact({"from": payer})
+    escrow.functions.withdraw(hook.address).transact({"from": agent})
+    assert escrow.functions.pendingWithdrawals(hook.address, agent).call() == 0
 
 
 if __name__ == "__main__":

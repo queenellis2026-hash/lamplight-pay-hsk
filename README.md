@@ -91,13 +91,18 @@ scripts/
   demo.py               3 end-to-end scenarios on a local EVM, writes receipts
   deploy_hsk_testnet.py deploy to HSK testnet (chain 133) — see below
 tests/
-  test_flow.py          41 tests: happy path, timeout refund, stranger guard,
+  test_flow.py          47 tests: happy path, timeout refund, stranger guard,
                     quote, review-window lifecycle, review-window cap (30
                     days) + boundary, fee/no-bool tokens,
                     cancelUnaccepted, mint access control, blocklisted
                     agent — release and dispute-timeout credit a pull
                     balance, job reaches a terminal state, agent recovers
-                    via withdrawTo/withdraw
+                    via withdrawTo/withdraw, malformed-return tokens
+                    (32-byte value 2, 1-byte return, 10,000-byte return)
+                    credit instead of stranding, cross-function
+                    reentrancy (hook calling raiseDispute / acceptJob),
+                    zero-address agent guard, claimWindows (0, 0) before
+                    delivery
 demo-receipts/          quote + receipts produced by the demo run
 ```
 
@@ -105,9 +110,9 @@ demo-receipts/          quote + receipts produced by the demo run
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install web3 eth-tester py-solc-x py-evm pytest
-.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 18,680 B
+.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 20,001 B
 .venv/bin/python scripts/demo.py      # 3 scenarios, all pass
-.venv/bin/python -m pytest tests/ -v  # 23 passed
+.venv/bin/python -m pytest tests/ -v  # 47 passed
 ```
 
 Demo result (local EVM, real tx hashes in `demo-receipts/`):
@@ -166,14 +171,24 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   strict (`>`): at the exact boundary second the payer's dispute (`<=`)
   still wins, so a last-second dispute can never lose a race to the
   agent's release. `claimWindows()` returns the exact claim and
-  dispute-timeout timestamps so callers never re-compute them. Funding
+  dispute-timeout timestamps so callers never re-compute them — and
+  before delivery it returns (0, 0), since the window offsets from 0
+  would look like 1970 timestamps that have already passed. Funding
   stores what actually arrived (balance before/after, so fee-on-transfer
   tokens cannot make the escrow insolvent), token moves use SafeERC20-style
-  calls (USDT-style no-bool tokens work), a failing payout leg credits a
-  pull balance instead of stranding the job, and `MockUSDC` mint is
-  owner-gated. 41 tests cover every new path, including the previously
-  untested ones (release while Disputed, both resolve directions, early
-  timeout, cancel, window of 0, reentrancy through a hook token).
+  calls (USDT-style no-bool tokens work) whose returndata is inspected
+  with a bounded copy — a token returning 32 bytes holding a non-bool
+  value, a wrong-length return, or huge returndata can never revert the
+  payout or run it out of gas on the copy; the payout is treated as
+  failed and credited instead. A failing payout leg credits a pull
+  balance instead of stranding the job, and `MockUSDC` mint is
+  owner-gated. The agent may never be the zero address (its own guard,
+  symmetric with the token check). 47 tests cover every new path,
+  including the previously untested ones (release while Disputed, both
+  resolve directions, early timeout, cancel, window of 0, reentrancy
+  through a hook token, cross-function reentrancy through a hook calling
+  raiseDispute or acceptJob, and malformed-return tokens in all three
+  shapes).
   Full verbatim findings: `reviews-2026-10-27.md`. Note: the
   contracts deployed on HSK testnet (above) are the PRE-fix version —
   redeploy is needed before demo selection for the on-chain code to match

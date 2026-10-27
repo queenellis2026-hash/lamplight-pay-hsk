@@ -197,3 +197,66 @@ what you think is best").
   (now four fix rounds behind source) — redeploy + Build edit are
   separate steps. No GitHub push and no Build edit were made in
   this task.
+
+## Round 5 — Claude round-4 findings + round-4 improvements — DONE Oct 27, 2026 (evening)
+
+Claude's round-4 re-review found 1 Medium (which does not hold up on
+inspection) + 2 Lows; Grok found nothing. This round fixes the two Lows,
+verifies the Medium, and implements Grok's + Claude's round-4
+improvement suggestions. Skipped only: the arbiter fee (Claude feature —
+nice-to-have, not needed for the demo).
+
+- **MEDIUM (does NOT hold up): one of the new tests allegedly fails as
+  written.** Claude claimed test_arbiter_resolves_dispute_to_agent calls
+  resolveDispute(jid, True) from the payer after the arbiter resolved,
+  with no pytest.raises. Verified by reading the test (it ends with
+  `assert _state(env, jid) == 4` and makes NO such call) and by running
+  the suite: 47/47 pass. No change made. Claude misread it.
+- **LOW — claimWindows() returns misleading values before delivery.**
+  For an undelivered job with a 600s window it returned (600, 600 +
+  7d), which look like 1970 timestamps that already passed. Fixed: it
+  returns (0, 0) when deliveredAt == 0. The test that locked the old
+  behavior was updated to assert (0, 0).
+- **LOW — _tryTransfer is not actually non-reverting.** It used
+  abi.decode on the full returndata, so a token returning 32 bytes
+  with value 2, a 1-byte return, or very large returndata made
+  abi.decode revert or the copy run out of gas — and release /
+  resolveDispute / settleDisputeTimeout then reverted forever. Fixed:
+  the returndata is now inspected with a bounded copy (new
+  _lastCallReturnedTrue: at most 32 bytes copied; empty = USDT-style
+  success, 32 bytes holding exactly 1 = true, anything else = failure),
+  so a malformed return is treated as a failed payout and credited
+  instead of reverting. The same treatment was applied to
+  _safeTransferFrom (it shared the abi.decode pattern — a malformed
+  return there now fails cleanly with "funding failed" instead of
+  reverting inside the decode).
+- **New test token:** `contracts/MalformedReturnToken.sol` (TEST ONLY,
+  owner-gated modes: 0 = 32 bytes holding 2, 1 = 1-byte return, 2 =
+  10,000 bytes of returndata, 3 = well-behaved). In malformed modes
+  the transfer moves no funds — the token refused the payout but
+  answered with garbage instead of false. `scripts/compile.py` builds
+  all seven contracts; the fixture deploys and funds it.
+- **Tests (3, parameterized over the three malformed modes):** release
+  on a malformed-return job completes (job Released, not stranded),
+  the pull balance is credited, the agent's token balance is unchanged,
+  and once the token behaves again the credit pays out in full via
+  withdraw().
+- **Zero-address agent guard (Grok improvement 2):** createJob's shared
+  "zero address" check is now two explicit checks — token ("zero
+  address") then agent ("zero address agent") — so the two guards are
+  symmetric and the error string is unambiguous. Tested for both.
+- **Cross-function reentrancy (Claude improvement):** two new tests —
+  a hook calling raiseDispute() and one calling acceptJob() during
+  release()'s payout transfer. Both inner calls fail access control
+  (the token is not a party / not the agent; returndata carries the
+  message), the payout credits, the job reaches Released, and the
+  credit pays out once the hook is disarmed.
+- **Tests: 47 passed, 0 failed** (41 before + 6 new). Demo re-run:
+  3/3 scenarios + stranger guard pass, final balances unchanged
+  (payer 9920 / agent 80 / escrow 0) — the v3 video is NOT stale (the
+  demo never uses the malformed token or the cross-function hook).
+  Contract bytecode grew to 20,001 B (was 19,919 B after round 4).
+- NOT done here: the testnet deployment is still the PRE-fix contract
+  (now five fix rounds behind source) — redeploy + Build edit are
+  separate steps. No GitHub push and no Build edit were made in
+  this task.

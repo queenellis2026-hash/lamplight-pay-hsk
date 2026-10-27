@@ -139,7 +139,8 @@ contract AgentEscrow {
         string calldata metadataURI,
         address arbiter
     ) external nonReentrant returns (uint256 jobId) {
-        require(agent != address(0) && token != address(0), "zero address");
+        require(token != address(0), "zero address");
+        require(agent != address(0), "zero address agent");
         require(agent != msg.sender, "payer cannot be agent");
         require(arbiter != msg.sender, "arbiter cannot be payer");
         require(arbiter != agent, "arbiter cannot be agent");
@@ -345,11 +346,39 @@ contract AgentEscrow {
     ///   (USDT-style tokens) and returns false instead of reverting on a
     ///   false return or a failed call, so the caller can decide how to
     ///   handle the failure (credit a pull balance, or revert).
+    /// @dev The returndata is inspected with a bounded copy (see
+    ///   _lastCallReturnedTrue): a token returning 32 bytes holding a
+    ///   value other than 1, a wrong-length return, or a huge returndata
+    ///   can never revert this call or run it out of gas on the copy —
+    ///   the transfer is treated as failed and the payout is credited.
     function _tryTransfer(address token, address to, uint256 amount) internal returns (bool) {
-        (bool success, bytes memory data) = token.call(
+        (bool success, ) = token.call(
             abi.encodeWithSelector(IERC20.transfer.selector, to, amount)
         );
-        return success && (data.length == 0 || abi.decode(data, (bool)));
+        if (!success) return false;
+        return _lastCallReturnedTrue();
+    }
+
+    /// @dev Inspect the returndata of the most recent external call:
+    ///   empty = USDT-style success (no return value); exactly 32 bytes
+    ///   holding 1 = true; anything else — 0 (false), a non-bool value
+    ///   such as 2, a wrong length — = failure. Copies at most 32 bytes,
+    ///   so a token returning megabytes of returndata cannot run the
+    ///   caller out of gas on the copy. Called immediately after the
+    ///   external call, with no other external call in between, so the
+    ///   returndata buffer still holds that call's return.
+    function _lastCallReturnedTrue() internal view returns (bool) {
+        uint256 size;
+        assembly { size := returndatasize() }
+        if (size == 0) return true;
+        if (size != 32) return false;
+        uint256 value;
+        assembly {
+            let ptr := mload(0x40)
+            returndatacopy(ptr, 0, 32)
+            value := mload(ptr)
+        }
+        return value == 1;
     }
 
     /// @dev Attempt a token payout; on failure, credit a pull balance
@@ -366,12 +395,14 @@ contract AgentEscrow {
 
     /// @dev SafeERC20-style transferFrom: accepts an empty return value
     ///   (USDT-style tokens) and reverts on a false return or a failed call.
+    ///   Uses the same bounded returndata inspection as _tryTransfer, so a
+    ///   malformed return can never revert the funding call itself — it
+    ///   fails cleanly with "funding failed" instead.
     function _safeTransferFrom(address token, address from, uint256 amount) internal {
-        (bool success, bytes memory data) = token.call(
+        (bool success, ) = token.call(
             abi.encodeWithSelector(IERC20.transferFrom.selector, from, address(this), amount)
         );
-        require(success, "funding failed");
-        require(data.length == 0 || abi.decode(data, (bool)), "funding failed");
+        require(success && _lastCallReturnedTrue(), "funding failed");
     }
 
     /// @notice The two timestamps that bound the agent's claim and the
@@ -379,13 +410,15 @@ contract AgentEscrow {
     /// @dev agentClaimAt is the last second of the review window: the
     ///   agent's claim is strict (>), so it may claim from agentClaimAt
     ///   + 1. A dispute may be resolved up to disputeTimeoutAt (<=) and
-    ///   times out after it (>). Only meaningful once the job is delivered
-    ///   (deliveredAt != 0); before delivery it returns the window
-    ///   offsets from 0.
-    /// @return agentClaimAt deliveredAt + reviewWindow
-    /// @return disputeTimeoutAt deliveredAt + reviewWindow + DISPUTE_PERIOD
+    ///   times out after it (>). Before delivery (deliveredAt == 0) both
+    ///   are 0: the window offsets from 0 would look like 1970
+    ///   timestamps that have already passed, so a UI or agent could
+    ///   wrongly conclude the claim is open.
+    /// @return agentClaimAt deliveredAt + reviewWindow, or 0 if not delivered
+    /// @return disputeTimeoutAt deliveredAt + reviewWindow + DISPUTE_PERIOD, or 0 if not delivered
     function claimWindows(uint256 jobId) external view returns (uint256 agentClaimAt, uint256 disputeTimeoutAt) {
         Job storage job = jobs[jobId];
+        if (job.deliveredAt == 0) return (0, 0);
         agentClaimAt = job.deliveredAt + job.reviewWindow;
         disputeTimeoutAt = agentClaimAt + DISPUTE_PERIOD;
     }
