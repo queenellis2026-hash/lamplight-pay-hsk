@@ -31,6 +31,16 @@ pragma solidity ^0.8.24;
 ///   escrow insolvent by recording more than it holds.
 /// @dev All token moves use SafeERC20-style low-level calls that accept an
 ///   empty return value, so USDT-style tokens (no bool return) work.
+/// @dev Payouts are PULL on failure. release / refund / cancel / dispute
+///   settlement first try a direct token transfer; if that fails — the
+///   token blocklists the recipient, or otherwise refuses the payout leg
+///   — the amount is credited to a pull balance instead and the job still
+///   reaches its terminal state, so a failing transfer can never strand a
+///   job. The recipient pulls the credit later with withdraw(), or to a
+///   different address with withdrawTo() (added Oct 27, 2026: a credit to
+///   a blocklisted address can never be pulled to itself, so withdrawTo()
+///   is the only recovery path). Funding (createJob) still reverts on a
+///   failed transferFrom — a job that was never funded must not exist.
 /// @dev Minimal reentrancy guard included; no external dependencies.
 interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
@@ -72,6 +82,11 @@ contract AgentEscrow {
     uint256 public jobCount;
     mapping(uint256 => Job) public jobs;
 
+    /// @dev Pull balances: token => account => amount credited when a
+    ///   payout leg failed (see _payOrCredit). Keyed by token because a
+    ///   job's token varies; a recipient may hold credits in several.
+    mapping(address => mapping(address => uint256)) public pendingWithdrawals;
+
     event JobCreated(uint256 indexed jobId, address indexed payer, address indexed agent, address token, uint256 amount, uint256 deadline, string metadataURI);
     event JobAccepted(uint256 indexed jobId, address indexed agent);
     event DeliverySubmitted(uint256 indexed jobId, bytes32 deliveryHash);
@@ -82,6 +97,8 @@ contract AgentEscrow {
     event DisputeRaised(uint256 indexed jobId, address indexed by);
     event DisputeResolved(uint256 indexed jobId, bool releasedToAgent);
     event DisputeTimedOut(uint256 indexed jobId, address indexed agent, uint256 amount);
+    event Credited(address indexed token, address indexed account, uint256 amount);
+    event Withdrawn(address indexed token, address indexed account, address to, uint256 amount);
 
     bool private _locked;
     modifier nonReentrant() {
@@ -179,7 +196,7 @@ contract AgentEscrow {
             require(msg.sender == job.payer, "not payer");
         }
         job.state = State.Released;
-        _safeTransfer(job.token, job.agent, job.amount);
+        _payOrCredit(job.token, job.agent, job.amount);
         emit JobReleased(jobId, job.agent, job.amount);
     }
 
@@ -192,7 +209,7 @@ contract AgentEscrow {
         );
         require(block.timestamp > job.deadline, "deadline not passed");
         job.state = State.Refunded;
-        _safeTransfer(job.token, job.payer, job.amount);
+        _payOrCredit(job.token, job.payer, job.amount);
         emit JobRefunded(jobId, job.payer, job.amount);
     }
 
@@ -201,7 +218,7 @@ contract AgentEscrow {
         Job storage job = jobs[jobId];
         require(job.state == State.Created, "only before accept");
         job.state = State.Cancelled;
-        _safeTransfer(job.token, job.payer, job.amount);
+        _payOrCredit(job.token, job.payer, job.amount);
         emit JobCancelled(jobId);
     }
 
@@ -215,7 +232,7 @@ contract AgentEscrow {
         require(job.state == State.Created, "not created");
         require(block.timestamp > job.deadline, "deadline not passed");
         job.state = State.Cancelled;
-        _safeTransfer(job.token, job.payer, job.amount);
+        _payOrCredit(job.token, job.payer, job.amount);
         emit JobCancelledUnaccepted(jobId);
     }
 
@@ -249,11 +266,11 @@ contract AgentEscrow {
         );
         if (releaseToAgent) {
             job.state = State.Released;
-            _safeTransfer(job.token, job.agent, job.amount);
+            _payOrCredit(job.token, job.agent, job.amount);
             emit JobReleased(jobId, job.agent, job.amount);
         } else {
             job.state = State.Refunded;
-            _safeTransfer(job.token, job.payer, job.amount);
+            _payOrCredit(job.token, job.payer, job.amount);
             emit JobRefunded(jobId, job.payer, job.amount);
         }
         emit DisputeResolved(jobId, releaseToAgent);
@@ -272,20 +289,58 @@ contract AgentEscrow {
             "dispute period not ended"
         );
         job.state = State.Released;
-        _safeTransfer(job.token, job.agent, job.amount);
+        _payOrCredit(job.token, job.agent, job.amount);
         emit JobReleased(jobId, job.agent, job.amount);
         emit DisputeResolved(jobId, true);
         emit DisputeTimedOut(jobId, job.agent, job.amount);
     }
 
-    /// @dev SafeERC20-style transfer: accepts an empty return value
-    ///   (USDT-style tokens) and reverts on a false return or a failed call.
-    function _safeTransfer(address token, address to, uint256 amount) internal {
+    /// @notice Withdraw the caller's pending credit for a token.
+    /// @dev Credits arise when a payout leg failed (see _payOrCredit).
+    ///   A failed withdrawal reverts and preserves the credit.
+    function withdraw(address token) external nonReentrant {
+        uint256 amount = pendingWithdrawals[token][msg.sender];
+        require(amount > 0, "nothing to withdraw");
+        pendingWithdrawals[token][msg.sender] = 0;
+        require(_tryTransfer(token, msg.sender, amount), "withdrawal failed");
+        emit Withdrawn(token, msg.sender, msg.sender, amount);
+    }
+
+    /// @notice Withdraw the caller's pending credit for a token to a
+    ///   chosen address. Essential when the credited address itself is
+    ///   blocklisted: a transfer to it would fail again, so the credit
+    ///   is pulled to an address the token accepts. Only the credited
+    ///   party may move its own credit.
+    function withdrawTo(address token, address to) external nonReentrant {
+        require(to != address(0), "zero address");
+        uint256 amount = pendingWithdrawals[token][msg.sender];
+        require(amount > 0, "nothing to withdraw");
+        pendingWithdrawals[token][msg.sender] = 0;
+        require(_tryTransfer(token, to, amount), "withdrawal failed");
+        emit Withdrawn(token, msg.sender, to, amount);
+    }
+
+    /// @dev SafeERC20-style transfer attempt: accepts an empty return value
+    ///   (USDT-style tokens) and returns false instead of reverting on a
+    ///   false return or a failed call, so the caller can decide how to
+    ///   handle the failure (credit a pull balance, or revert).
+    function _tryTransfer(address token, address to, uint256 amount) internal returns (bool) {
         (bool success, bytes memory data) = token.call(
             abi.encodeWithSelector(IERC20.transfer.selector, to, amount)
         );
-        require(success, "payout failed");
-        require(data.length == 0 || abi.decode(data, (bool)), "payout failed");
+        return success && (data.length == 0 || abi.decode(data, (bool)));
+    }
+
+    /// @dev Attempt a token payout; on failure, credit a pull balance
+    ///   instead of reverting the settlement. The job is already in its
+    ///   terminal state when this runs, so the recipient's funds are
+    ///   never lost — they are pulled later with withdraw() / withdrawTo().
+    function _payOrCredit(address token, address to, uint256 amount) internal {
+        if (_tryTransfer(token, to, amount)) {
+            return;
+        }
+        pendingWithdrawals[token][to] += amount;
+        emit Credited(token, to, amount);
     }
 
     /// @dev SafeERC20-style transferFrom: accepts an empty return value

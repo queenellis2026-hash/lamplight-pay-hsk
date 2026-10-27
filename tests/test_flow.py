@@ -48,11 +48,13 @@ def env():
     escrow = deploy("AgentEscrow")
     fee = deploy("FeeToken")
     nobool = deploy("NoBoolToken")
-    for token in (musdc, fee, nobool):
+    blocklist = deploy("BlocklistToken")
+    for token in (musdc, fee, nobool, blocklist):
         token.functions.mint(payer, 10_000 * ONE).transact({"from": payer})
         token.functions.approve(escrow.address, 10_000 * ONE).transact({"from": payer})
     return {"w3": w3, "tester": tester, "payer": payer, "agent": agent,
-            "musdc": musdc, "escrow": escrow, "fee": fee, "nobool": nobool}
+            "musdc": musdc, "escrow": escrow, "fee": fee, "nobool": nobool,
+            "blocklist": blocklist}
 
 
 def _travel(env, seconds):
@@ -330,6 +332,64 @@ def test_agent_claim_just_after_window_end_succeeds(env):
     escrow.functions.release(jid).transact({"from": agent})
     assert musdc.functions.balanceOf(agent).call() == before + 10 * ONE
     assert _state(env, jid) == 4  # State.Released
+
+
+# ---- Re-review round 3 (Oct 27, 2026): failing payout must not strand a job ----
+
+def test_blocklisted_agent_release_credits_pull_balance(env):
+    """Claude Low (round 3): a token that blocklists the agent after
+    delivery must not strand the job. release() credits a pull balance
+    instead of reverting, the job reaches Released, and the agent still
+    gets paid — via withdrawTo() to an unblocked address, since a
+    transfer to the blocklisted agent itself would fail again."""
+    escrow, blk = env["escrow"], env["blocklist"]
+    payer, agent = env["payer"], env["agent"]
+    stranger = env["w3"].eth.accounts[2]
+    agent_before = blk.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, token=blk.address)
+    # The token blocklists the agent mid-job, after delivery.
+    blk.functions.setBlocked(agent, True).transact({"from": payer})
+    # release() must NOT revert: the payout leg fails, so it is credited.
+    escrow.functions.release(jid).transact({"from": payer})
+    assert _state(env, jid) == 4  # State.Released — terminal, not stranded
+    assert escrow.functions.pendingWithdrawals(blk.address, agent).call() == 10 * ONE
+    assert blk.functions.balanceOf(escrow.address).call() == 10 * ONE
+    assert blk.functions.balanceOf(agent).call() == agent_before
+    # withdraw() to the still-blocklisted agent fails again, credit kept.
+    with pytest.raises(TransactionFailed, match="withdrawal failed"):
+        escrow.functions.withdraw(blk.address).transact({"from": agent})
+    assert escrow.functions.pendingWithdrawals(blk.address, agent).call() == 10 * ONE
+    # withdrawTo() to an unblocked address recovers the full amount.
+    third_before = blk.functions.balanceOf(stranger).call()
+    escrow.functions.withdrawTo(blk.address, stranger).transact({"from": agent})
+    assert blk.functions.balanceOf(stranger).call() == third_before + 10 * ONE
+    assert escrow.functions.pendingWithdrawals(blk.address, agent).call() == 0
+    assert blk.functions.balanceOf(escrow.address).call() == 0
+
+
+def test_blocklisted_agent_dispute_timeout_credits_pull_balance(env):
+    """Same pull-balance exit through the Disputed path: a dispute the
+    payer raised and abandoned, settled by timeout while the agent is
+    blocklisted, must still reach Released with a withdrawable credit —
+    and withdraw() works once the blocklist is lifted."""
+    escrow, blk = env["escrow"], env["blocklist"]
+    payer, agent = env["payer"], env["agent"]
+    agent_before = blk.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600, token=blk.address)
+    escrow.functions.raiseDispute(jid).transact({"from": payer})
+    dispute_period = escrow.functions.DISPUTE_PERIOD().call()
+    _travel(env, 600 + dispute_period + 100)
+    blk.functions.setBlocked(agent, True).transact({"from": payer})
+    # settleDisputeTimeout() must NOT revert on the failed payout leg.
+    escrow.functions.settleDisputeTimeout(jid).transact({"from": agent})
+    assert _state(env, jid) == 4  # State.Released — terminal, not stranded
+    assert escrow.functions.pendingWithdrawals(blk.address, agent).call() == 10 * ONE
+    # Once the token unblocks the agent, withdraw() to itself pays out.
+    blk.functions.setBlocked(agent, False).transact({"from": payer})
+    escrow.functions.withdraw(blk.address).transact({"from": agent})
+    assert blk.functions.balanceOf(agent).call() == agent_before + 10 * ONE
+    assert escrow.functions.pendingWithdrawals(blk.address, agent).call() == 0
+    assert blk.functions.balanceOf(escrow.address).call() == 0
 
 
 def test_quote_hash_stable_and_expiry():

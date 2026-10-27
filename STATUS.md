@@ -81,6 +81,50 @@ ChatGPT's leg was blocked by its Free-plan file-upload limit until
   separate steps. No GitHub push and no Build edit were made in this
   task.
 
+## Round-2 re-review fix (Oct 27, 2026)
+
+A second re-review of the fixed contracts (Claude + Grok, fresh wipe,
+one shot; ChatGPT still blocked by its upload limit) found 1 new HSK
+finding, fixed in source + tests. Grok found nothing:
+- **Low — one failing token transfer permanently strands a job.**
+  `_safeTransfer` (called from release, resolveDispute, and
+  settleDisputeTimeout) reverted with "payout failed" when the token
+  refused the payout — e.g. a USDC-style token blocklisting the agent
+  after delivery — and with a silent payer the job stayed in Delivered
+  or Disputed forever (the payer's only exit was dispute-then-resolve
+  inside the window). Fixed with the pull-balance option (the Arc
+  pattern, no new address plumbing): `_safeTransfer` now returns a
+  bool; `_payOrCredit` credits `pendingWithdrawals[token][to]` and
+  emits `Credited` when the transfer fails instead of reverting, so
+  the settlement completes and the job reaches a terminal state. The
+  agent recovers the credit with `withdraw(token)` (to itself) or
+  `withdrawTo(token, to)` (to a different address) — the latter is the
+  recovery path while the blocklist is still in force, since a
+  `withdraw()` to the blocklisted agent itself fails again. A failed
+  credit does not touch the job's `amountReceived` (it is cleared on
+  the push attempt; the credit IS the claim on the funds), and a
+  `withdrawTo` to the zero address reverts ("Invalid recipient").
+  New test token `contracts/BlocklistToken.sol` (TEST ONLY,
+  owner-gated blocklist). Tests: a mid-job blocklist no longer strands
+  the job — release() credits the pull balance, the job reaches
+  Released, withdraw() fails again while blocked (credit kept), and
+  withdrawTo() to an unblocked address pays the full amount; the same
+  through the Disputed path — settleDisputeTimeout() credits the
+  balance, and withdraw() pays out once the blocklist is lifted.
+- Verification: `pytest` 23 passed, 0 failed (21 + 2 new); demo 3/3 +
+  stranger guard pass with identical final balances (payer 9920 /
+  agent 80 / escrow 0). The v3 video is therefore NOT visibly stale —
+  the demo output is unchanged (the fix only changes what happens when
+  a payout leg fails, which the demo never triggers). AgentEscrow
+  bytecode grew to 18,680 B (was 16,788 B).
+- NOT done here: the testnet deployment is still the PRE-fix contract
+  (now three fix rounds behind source) — redeploy + Build edit are
+  separate steps. Reviewers' improvement and new-feature suggestions
+  (timestamp helper, gas tests, coverage, per-job arbiter) were NOT
+  implemented in this round — findings only, per instruction; those
+  are a separate decision. No GitHub push and no Build edit were made
+  in this task.
+
 ## HSP (HashKey Settlement Protocol)
 
 The track is defined around HSP's Payment Mandate + Gateway. The HSP sandbox

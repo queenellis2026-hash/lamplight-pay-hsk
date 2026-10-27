@@ -71,9 +71,16 @@ contracts/
                     Review window enforced: deliveredAt recorded, agent may
                     claim after the window, disputes only inside it, and a
                     disputed job times out to the agent after 7 days.
+                    A payout that fails (blocklisted recipient, reverted
+                    transfer) is credited as a pull balance instead of
+                    reverting the settlement, so a job can never be
+                    stranded by a failing token; the agent pulls it with
+                    withdraw() or withdrawTo().
   MockUSDC.sol      test-only ERC-20 (6 dp), owner-gated mint
   FeeToken.sol      TEST ONLY 1% fee token (proves funding stores net received)
   NoBoolToken.sol   TEST ONLY USDT-style token (no bool return on transfers)
+  BlocklistToken.sol TEST ONLY blocklist token (proves a failed payout
+                    credits a pull balance instead of stranding the job)
 a2a/
   quote.py          hash-stable quote objects (x402-style)
   receipt.py        hash-stable settlement receipts
@@ -82,10 +89,13 @@ scripts/
   demo.py               3 end-to-end scenarios on a local EVM, writes receipts
   deploy_hsk_testnet.py deploy to HSK testnet (chain 133) — see below
 tests/
-  test_flow.py          21 tests: happy path, timeout refund, stranger guard,
+  test_flow.py          23 tests: happy path, timeout refund, stranger guard,
                     quote, review-window lifecycle, review-window cap (30
                     days) + boundary, fee/no-bool tokens,
-                    cancelUnaccepted, mint access control
+                    cancelUnaccepted, mint access control, blocklisted
+                    agent — release and dispute-timeout credit a pull
+                    balance, job reaches a terminal state, agent recovers
+                    via withdrawTo/withdraw
 demo-receipts/          quote + receipts produced by the demo run
 ```
 
@@ -93,9 +103,9 @@ demo-receipts/          quote + receipts produced by the demo run
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install web3 eth-tester py-solc-x py-evm pytest
-.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 16,788 B
+.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 18,680 B
 .venv/bin/python scripts/demo.py      # 3 scenarios, all pass
-.venv/bin/python -m pytest tests/ -v  # 21 passed
+.venv/bin/python -m pytest tests/ -v  # 23 passed
 ```
 
 Demo result (local EVM, real tx hashes in `demo-receipts/`):
