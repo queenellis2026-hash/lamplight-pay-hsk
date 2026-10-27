@@ -10,13 +10,24 @@ contract MockUSDC {
     uint8 public constant decimals = 6;
     uint256 public totalSupply;
 
+    /// @dev Mint is restricted to the deployer (owner). A freely mintable
+    ///   token is fine for a labelled test token, but an open mint on an
+    ///   accidental mainnet deploy would be catastrophic — so the owner
+    ///   gate is the default. The demo and tests mint from the deployer.
+    address public owner;
+
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
+    constructor() {
+        owner = msg.sender;
+    }
+
     function mint(address to, uint256 amount) external {
+        require(msg.sender == owner, "not owner");
         require(to != address(0), "zero address");
         totalSupply += amount;
         balanceOf[to] += amount;

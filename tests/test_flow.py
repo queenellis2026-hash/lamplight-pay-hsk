@@ -1,6 +1,12 @@
 """Tests for Lamplight Pay — run on the local EVM, no network needed.
 
 Usage: .venv/bin/python -m pytest tests/ -v   (or: .venv/bin/python tests/test_flow.py)
+
+Covers the post-review contract (Oct 27, 2026): the review-window
+lifecycle (deliveredAt, agent claim after the window, dispute restricted
+to the window, dispute timeout), fee-on-transfer funding, USDT-style
+no-bool-return tokens, the named cancelUnaccepted path, and owner-gated
+minting on the test tokens.
 """
 from __future__ import annotations
 
@@ -13,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 import pytest  # noqa: E402
 from eth_tester import EthereumTester, PyEVMBackend  # noqa: E402
+from eth_tester.exceptions import TransactionFailed  # noqa: E402
 from web3 import Web3  # noqa: E402
 from web3.providers.eth_tester import EthereumTesterProvider  # noqa: E402
 
@@ -39,10 +46,36 @@ def env():
 
     musdc = deploy("MockUSDC")
     escrow = deploy("AgentEscrow")
-    musdc.functions.mint(payer, 10_000 * ONE).transact({"from": payer})
-    musdc.functions.approve(escrow.address, 10_000 * ONE).transact({"from": payer})
+    fee = deploy("FeeToken")
+    nobool = deploy("NoBoolToken")
+    for token in (musdc, fee, nobool):
+        token.functions.mint(payer, 10_000 * ONE).transact({"from": payer})
+        token.functions.approve(escrow.address, 10_000 * ONE).transact({"from": payer})
     return {"w3": w3, "tester": tester, "payer": payer, "agent": agent,
-            "musdc": musdc, "escrow": escrow}
+            "musdc": musdc, "escrow": escrow, "fee": fee, "nobool": nobool}
+
+
+def _travel(env, seconds):
+    """Advance the test chain's clock by `seconds` and mine a block."""
+    latest = env["w3"].eth.get_block("latest")
+    env["tester"].time_travel(latest.timestamp + seconds)
+    env["tester"].mine_blocks(1)
+
+
+def _make_delivered(env, amount=10 * ONE, deadline=3600, window=600, token=None):
+    """Fund + accept + deliver a job; returns its job id."""
+    escrow = env["escrow"]
+    payer, agent = env["payer"], env["agent"]
+    token = token or env["musdc"].address
+    escrow.functions.createJob(agent, token, amount, deadline, window, "ipfs://t").transact({"from": payer})
+    jid = escrow.functions.jobCount().call() - 1
+    escrow.functions.acceptJob(jid).transact({"from": agent})
+    escrow.functions.submitDelivery(jid, Web3.keccak(text="deliverable")).transact({"from": agent})
+    return jid
+
+
+def _state(env, jid):
+    return env["escrow"].functions.getJob(jid).call()[6]
 
 
 def test_happy_path_release(env):
@@ -55,7 +88,7 @@ def test_happy_path_release(env):
     escrow.functions.submitDelivery(jid, Web3.keccak(text="deliverable")).transact({"from": agent})
     escrow.functions.release(jid).transact({"from": payer})
     assert musdc.functions.balanceOf(agent).call() == before + 10 * ONE
-    assert escrow.functions.getJob(jid).call()[6] == 4  # State.Released
+    assert _state(env, jid) == 4  # State.Released
 
 
 def test_timeout_refund(env):
@@ -64,9 +97,7 @@ def test_timeout_refund(env):
     before = musdc.functions.balanceOf(payer).call()
     escrow.functions.createJob(agent, musdc.address, 5 * ONE, 5, 0, "ipfs://t").transact({"from": payer})
     jid = escrow.functions.jobCount().call() - 1
-    latest = w3.eth.get_block("latest")
-    env["tester"].time_travel(latest.timestamp + 100)  # past the 5s deadline, on the chain's own clock
-    env["tester"].mine_blocks(1)
+    _travel(env, 100)  # past the 5s deadline, on the chain's own clock
     escrow.functions.refundAfterDeadline(jid).transact({"from": payer})
     assert musdc.functions.balanceOf(payer).call() == before  # funded then refunded in full
 
@@ -74,12 +105,159 @@ def test_timeout_refund(env):
 def test_stranger_cannot_release(env):
     escrow, musdc = env["escrow"], env["musdc"]
     payer, agent, stranger = env["payer"], env["agent"], env["w3"].eth.accounts[2]
-    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600, 600, "ipfs://t").transact({"from": payer})
+    jid = _make_delivered(env, amount=5 * ONE)
+    with pytest.raises(TransactionFailed, match="not payer"):
+        escrow.functions.release(jid).transact({"from": stranger})
+
+
+def test_agent_can_claim_after_review_window(env):
+    """Claude High / Grok Medium: a silent payer can no longer lock funds.
+    After deliveredAt + reviewWindow with no dispute, the agent releases."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    agent = env["agent"]
+    before = musdc.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    _travel(env, 700)  # past the 600s review window
+    escrow.functions.release(jid).transact({"from": agent})
+    assert musdc.functions.balanceOf(agent).call() == before + 10 * ONE
+    assert _state(env, jid) == 4  # State.Released
+
+
+def test_agent_cannot_claim_before_window_ends(env):
+    """The agent's claim is gated on the window; inside it, only the payer
+    may release."""
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    with pytest.raises(TransactionFailed, match="review window not ended"):
+        env["escrow"].functions.release(jid).transact({"from": env["agent"]})
+
+
+def test_dispute_after_window_reverts(env):
+    """ChatGPT's exact repro: 600s window, +1000s, raiseDispute must revert."""
+    escrow = env["escrow"]
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    _travel(env, 1000)
+    with pytest.raises(TransactionFailed, match="review window ended"):
+        escrow.functions.raiseDispute(jid).transact({"from": env["payer"]})
+
+
+def test_dispute_inside_window_works(env):
+    """A dispute raised inside the window still works, as before."""
+    escrow = env["escrow"]
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    escrow.functions.raiseDispute(jid).transact({"from": env["payer"]})
+    assert _state(env, jid) == 3  # State.Disputed
+
+
+def test_dispute_timeout_releases_to_agent(env):
+    """Claude High: a dispute the payer raised and then abandoned cannot
+    lock funds forever. After the dispute period, either party may settle
+    it and the agent is paid for delivered work."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    agent = env["agent"]
+    before = musdc.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    escrow.functions.raiseDispute(jid).transact({"from": env["payer"]})
+    dispute_period = escrow.functions.DISPUTE_PERIOD().call()
+    _travel(env, 600 + dispute_period + 100)
+    escrow.functions.settleDisputeTimeout(jid).transact({"from": agent})
+    assert musdc.functions.balanceOf(agent).call() == before + 10 * ONE
+    assert _state(env, jid) == 4  # State.Released
+
+
+def test_dispute_resolve_after_period_reverts(env):
+    """Once the dispute period has ended, resolveDispute is closed;
+    settleDisputeTimeout is the only exit."""
+    escrow = env["escrow"]
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    escrow.functions.raiseDispute(jid).transact({"from": env["payer"]})
+    dispute_period = escrow.functions.DISPUTE_PERIOD().call()
+    _travel(env, 600 + dispute_period + 100)
+    with pytest.raises(TransactionFailed, match="dispute period ended"):
+        escrow.functions.resolveDispute(jid, True).transact({"from": env["payer"]})
+
+
+def test_fee_on_transfer_token(env):
+    """Claude Medium: a 1% fee token funds the job with the NET amount
+    only. The job stores 99, the agent is paid 99, nothing is taken from
+    other jobs' funds."""
+    escrow, fee = env["escrow"], env["fee"]
+    payer, agent = env["payer"], env["agent"]
+    payer_before = fee.functions.balanceOf(payer).call()
+    agent_before = fee.functions.balanceOf(agent).call()
+    escrow.functions.createJob(agent, fee.address, 100 * ONE, 3600, 600, "ipfs://t").transact({"from": payer})
     jid = escrow.functions.jobCount().call() - 1
+    job = escrow.functions.getJob(jid).call()
+    assert job[3] == 99 * ONE  # stored amount is what arrived, not 100
+    assert fee.functions.balanceOf(escrow.address).call() == 99 * ONE
+    assert fee.functions.balanceOf(payer).call() == payer_before - 100 * ONE
     escrow.functions.acceptJob(jid).transact({"from": agent})
     escrow.functions.submitDelivery(jid, Web3.keccak(text="d")).transact({"from": agent})
-    with pytest.raises(Exception):
-        escrow.functions.release(jid).transact({"from": stranger})
+    escrow.functions.release(jid).transact({"from": payer})
+    # The escrow paid the full stored 99, but the token takes its 1% fee on
+    # the payout leg too, so the agent nets 99 * 99% = 98.01.
+    assert fee.functions.balanceOf(agent).call() == agent_before + 98_010_000
+    assert fee.functions.balanceOf(escrow.address).call() == 0
+
+
+def test_no_bool_token(env):
+    """Claude Low: a USDT-style token whose transfer/transferFrom return
+    no bool must not brick jobs — the escrow's low-level calls accept an
+    empty return value."""
+    escrow, nobool = env["escrow"], env["nobool"]
+    payer, agent = env["payer"], env["agent"]
+    agent_before = nobool.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, token=nobool.address)
+    escrow.functions.release(jid).transact({"from": payer})
+    assert nobool.functions.balanceOf(agent).call() == agent_before + 10 * ONE
+    assert _state(env, jid) == 4  # State.Released
+
+
+def test_cancel_unaccepted_after_deadline(env):
+    """Grok Medium: a named exit when the agent never accepts. The payer
+    reclaims a still-Created job after its deadline; the job ends in the
+    terminal Cancelled state, distinct from the generic refund path."""
+    escrow, musdc = env["escrow"], env["musdc"]
+    payer, agent = env["payer"], env["agent"]
+    before = musdc.functions.balanceOf(payer).call()
+    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 5, 0, "ipfs://t").transact({"from": payer})
+    jid = escrow.functions.jobCount().call() - 1
+    _travel(env, 100)  # past the 5s deadline; agent never accepted
+    escrow.functions.cancelUnaccepted(jid).transact({"from": payer})
+    assert musdc.functions.balanceOf(payer).call() == before
+    assert _state(env, jid) == 6  # State.Cancelled
+
+
+def test_cancel_unaccepted_before_deadline_reverts(env):
+    escrow, musdc = env["escrow"], env["musdc"]
+    payer, agent = env["payer"], env["agent"]
+    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600, 0, "ipfs://t").transact({"from": payer})
+    jid = escrow.functions.jobCount().call() - 1
+    with pytest.raises(TransactionFailed, match="deadline not passed"):
+        escrow.functions.cancelUnaccepted(jid).transact({"from": payer})
+
+
+def test_cancel_unaccepted_after_accept_reverts(env):
+    escrow, musdc = env["escrow"], env["musdc"]
+    payer, agent = env["payer"], env["agent"]
+    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 5, 0, "ipfs://t").transact({"from": payer})
+    jid = escrow.functions.jobCount().call() - 1
+    escrow.functions.acceptJob(jid).transact({"from": agent})
+    _travel(env, 100)
+    with pytest.raises(TransactionFailed, match="not created"):
+        escrow.functions.cancelUnaccepted(jid).transact({"from": payer})
+
+
+def test_mockusdc_mint_only_owner(env):
+    """Grok Low: mint is restricted to the deployer (owner)."""
+    musdc = env["musdc"]
+    payer, stranger = env["payer"], env["w3"].eth.accounts[2]
+    assert musdc.functions.owner().call() == payer
+    with pytest.raises(TransactionFailed, match="not owner"):
+        musdc.functions.mint(stranger, 1 * ONE).transact({"from": stranger})
+    # Owner mint still works (the demo and tests mint from the deployer).
+    before = musdc.functions.balanceOf(payer).call()
+    musdc.functions.mint(payer, 1 * ONE).transact({"from": payer})
+    assert musdc.functions.balanceOf(payer).call() == before + 1 * ONE
 
 
 def test_quote_hash_stable_and_expiry():
