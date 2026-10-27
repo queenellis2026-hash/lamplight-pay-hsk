@@ -1,0 +1,19 @@
+{
+  "agent": "0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF",
+  "amount": 50000000,
+  "chain_id": 133,
+  "delivery_hash": "022e4724e44888adb43546551dfbf10ce66f86cd8eb4ac57177d176c3dbfe181",
+  "escrow_contract": "0x2946259E0334f33A064106302415aD3391BeD384",
+  "job_id": 0,
+  "network": "HSKChain Testnet",
+  "outcome": "released",
+  "payer": "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf",
+  "protocol": "lamplight-pay/1",
+  "quote_id": "6fec4aa0-a383-4183-9746-3f779380d13e",
+  "receipt_hash": "0xb3af8bcbc700091bedf95a467d177853f98c1742b6121e37fc65b7232643f82e",
+  "service": "on-chain holder audit (top-20 wallets)",
+  "token": "0xF2E246BB76DF876Cef8b38ae84130F4F55De395b",
+  "token_symbol": "mUSDC",
+  "tx_hash": "99a6f95511a5ccb97776412e9e9f5b8c8c5981be6f51a972fcee4ea9142dde44",
+  "type": "settlement-receipt"
+}

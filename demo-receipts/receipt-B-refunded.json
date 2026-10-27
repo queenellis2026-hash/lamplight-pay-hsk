@@ -1,0 +1,19 @@
+{
+  "agent": "0x2B5AD5c4795c026514f8317c7a215E218DcCD6cF",
+  "amount": 20000000,
+  "chain_id": 133,
+  "delivery_hash": "",
+  "escrow_contract": "0x2946259E0334f33A064106302415aD3391BeD384",
+  "job_id": 1,
+  "network": "HSKChain Testnet",
+  "outcome": "refunded",
+  "payer": "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf",
+  "protocol": "lamplight-pay/1",
+  "quote_id": "timeout-demo",
+  "receipt_hash": "0x08994f8725097856f4f74720905585fb80af08b897e006dec5e2cf27e9439d8e",
+  "service": "abandoned job",
+  "token": "0xF2E246BB76DF876Cef8b38ae84130F4F55De395b",
+  "token_symbol": "mUSDC",
+  "tx_hash": "268f46d53c372aabc159e2f55737bed53da9493d28093c31902f67432cc12a18",
+  "type": "settlement-receipt"
+}
