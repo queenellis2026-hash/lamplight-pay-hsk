@@ -408,3 +408,81 @@ nice-to-have, not needed for the demo).
   now including `VanishingToken`); AgentEscrow bytecode 19,973 B (was
   19,934 B after round 8 — the code-length check adds 39 B). No GitHub
   push and no Build edit were made in this task.
+
+## Round 10 — Grok round-9 improvements — DONE Oct 27, 2026 (evening)
+
+- **Balance-delta check in `_payOrCredit` (Grok improvement 1, the big
+  one):** a token that returns true (or empty) while moving nothing
+  would previously mark the job paid with no credit — the funds
+  silently lost. `_payOrCredit` now reads the escrow's balance before
+  and after the transfer and treats the balance as the source of truth,
+  not the token's return value: only the shortfall (what the escrow
+  still holds for this job) is credited, so the invariant always holds
+  — escrow token balance == sum of unsettled job amounts + all pending
+  credits. The mirrored case is covered too: a token that moves the
+  funds and then returns false still counts as paid, never paid twice.
+  Balances are read with a new `_balanceOf` helper (low-level
+  staticcall, 32-byte-capped, never reverts): a high-level
+  `balanceOf()` call on a dead token reverts on the empty-returndata
+  ABI decode, which would have bricked the release instead of
+  crediting it — the round-9 VanishingToken test caught that in the
+  first full run, and the helper fixed it. Same balance verification
+  added to `withdraw()` / `withdrawTo()` (beyond the brief's letter,
+  same hole): a lying token can no longer zero a credit — the call
+  reverts with "withdrawal failed" and the credit is restored.
+- **New test token mode:** `MalformedReturnToken` mode 6 — transfer()
+  returns true but moves no funds (the lying token). Proved against
+  the old code: with the balance check temporarily removed, the
+  lying-token test and the invariant test both FAIL (escrow holds
+  10,000,000 with 0 unsettled and 0 credits — the exact silent loss);
+  restored, both pass. The job still reaches Released with the full
+  credit recorded — that is the established pull-balance design (a job
+  that stayed Delivered would be stranded); the brief's "must NOT flip
+  to Released" wording was read as "must not be marked paid".
+- **Settlement invariant test (Grok round-8 leftover):** a helper
+  `_assert_invariant` asserts, for every token, escrow balance ==
+  unsettled job amounts + pending credits, over the whole shared
+  fixture (every job and credit the suite created, including the
+  leftover credits the gas test deliberately leaves in place and the
+  fee token's net-received amounts). Called in the lying-token test
+  and in a standalone `test_settlement_invariant_holds`.
+- **`jobWindows()` view (Grok improvement):** one call returns
+  (deliveredAt, agentClaimAt, disputeTimeoutAt, credit) — claimWindows
+  + pendingCredit combined, so callers never recompute windows or call
+  three views. Before delivery the timestamps are 0 (same rule as
+  claimWindows); the credit is the job's agent's pull balance for the
+  job's token. Tested for undelivered / delivered / disputed /
+  credited jobs, cross-checked against claimWindows() and
+  pendingCredit().
+- **Gas pinning (Grok improvement 3):** the ceilings are now NAMED
+  CONSTANTS in the test file (`GAS_CEILING_SMALL` 150,000,
+  `GAS_CEILING_BOMB` 19,000,000, `GAS_CEILING_GAS_BURN` 19,900,000)
+  instead of literals scattered through the tests, and the mode-5
+  high-limit path finally has a ceiling assertion: re-measured with
+  the round-10 balance check at 19,697,418 gas (was 19,695,562 —
+  +1,856 for the two balance reads), ceiling 19,900,000, so a future
+  solc change that alters the 1/64 retention math is caught the same
+  way the return-bomb regression is. The gas test and the bomb test
+  now use the constants.
+- **Boundary semantics (Grok round-8 leftover):** the exact boundary
+  rules are now documented in the NatSpec of each function — release's
+  agent claim is STRICT (>) at deliveredAt + reviewWindow, raiseDispute
+  is INCLUSIVE (<=) at the same second, resolveDispute is INCLUSIVE
+  (<=) at the dispute-timeout second, settleDisputeTimeout is STRICT
+  (>) after it — and in `jobWindows()`'s NatSpec.
+- **Tests: 56 passed, 0 failed** (52 before + 4 new: lying-token
+  payout, lying-token withdraw, jobWindows view, settlement
+  invariant). Demo re-run: 3/3 scenarios + stranger guard pass,
+  final balances unchanged (payer 9920 / agent 80 / escrow 0) —
+  receipts B and C byte-identical to the pre-round-10 run (receipt A
+  differs only by its fresh quote, as always). The v3 video is
+  therefore NOT visibly stale. Build artifacts recompiled
+  (`scripts/compile.py`); AgentEscrow bytecode 20,778 B (was 19,973 B
+  after round 9 — the balance checks + jobWindows view add 805 B).
+- NOT done here: the testnet deployment is still the PRE-fix contract
+  (now ten fix rounds behind source) — redeploy + Build edit are
+  separate steps. Held, per instruction: agent-side arbiter
+  confirmation at acceptJob and the withdrawBatch / multi-token
+  withdraw helper (Grok's round-9 new-feature suggestions). No Build
+  edit was made in this task.
+

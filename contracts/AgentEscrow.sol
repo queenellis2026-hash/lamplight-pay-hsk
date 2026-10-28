@@ -204,10 +204,13 @@ contract AgentEscrow {
     ///   arbiter during the review window). After the review window ends
     ///   (deliveredAt + reviewWindow) with no dispute raised, the AGENT may
     ///   also release and claim — a silent payer cannot lock funds forever.
-    ///   The agent's claim is STRICT (block.timestamp > deliveredAt +
-    ///   reviewWindow): at the exact boundary second the payer's dispute
-    ///   (raiseDispute, <=) still wins, so a last-second dispute can never
-    ///   lose a race to the agent's release.
+    /// @dev Boundary semantics: the agent's claim is STRICT
+    ///   (block.timestamp > deliveredAt + reviewWindow). At exactly
+    ///   deliveredAt + reviewWindow the claim reverts and the payer's
+    ///   dispute (raiseDispute, <=) still wins, so a last-second dispute
+    ///   can never lose a race to the agent's release. One second later
+    ///   the claim succeeds. The payer's release has no window check —
+    ///   the payer may release at any time while Delivered.
     function release(uint256 jobId) external nonReentrant {
         Job storage job = jobs[jobId];
         require(job.state == State.Delivered, "not delivered");
@@ -263,6 +266,12 @@ contract AgentEscrow {
     /// @notice Either party raises a dispute — only INSIDE the review window.
     /// @dev After deliveredAt + reviewWindow, raiseDispute reverts: the
     ///   window is the payer's chance to object, not an open-ended right.
+    /// @dev Boundary semantics: the dispute window is INCLUSIVE
+    ///   (block.timestamp <= deliveredAt + reviewWindow). At exactly
+    ///   deliveredAt + reviewWindow the dispute still succeeds — the
+    ///   window's last second belongs to the disputer, and the agent's
+    ///   claim (strict >) cannot take it. One second later the window
+    ///   has ended and raiseDispute reverts.
     function raiseDispute(uint256 jobId) external {
         Job storage job = jobs[jobId];
         require(msg.sender == job.payer || msg.sender == job.agent, "not a party");
@@ -287,6 +296,10 @@ contract AgentEscrow {
     ///   DISPUTE_PERIOD after delivery); after that, settleDisputeTimeout()
     ///   is the only exit, so a dispute cannot lock funds forever — even
     ///   if the arbiter goes silent.
+    /// @dev Boundary semantics: resolution is INCLUSIVE
+    ///   (block.timestamp <= deliveredAt + reviewWindow + DISPUTE_PERIOD).
+    ///   At exactly the dispute-timeout second the arbiter may still
+    ///   resolve; one second later only settleDisputeTimeout() is open.
     function resolveDispute(uint256 jobId, bool releaseToAgent) external nonReentrant {
         Job storage job = jobs[jobId];
         require(job.state == State.Disputed, "not disputed");
@@ -315,6 +328,11 @@ contract AgentEscrow {
     ///   the dispute period ends, either party may settle it, releasing the
     ///   funds to the agent. Delivered work gets paid unless the payer acts
     ///   in time; a payer cannot dispute, go silent, and keep the money.
+    /// @dev Boundary semantics: the timeout is STRICT
+    ///   (block.timestamp > deliveredAt + reviewWindow + DISPUTE_PERIOD).
+    ///   At exactly the dispute-timeout second settleDisputeTimeout()
+    ///   reverts and only resolveDispute() is open; one second later
+    ///   the timeout settles to the agent.
     function settleDisputeTimeout(uint256 jobId) external nonReentrant {
         Job storage job = jobs[jobId];
         require(job.state == State.Disputed, "not disputed");
@@ -333,11 +351,26 @@ contract AgentEscrow {
     /// @notice Withdraw the caller's pending credit for a token.
     /// @dev Credits arise when a payout leg failed (see _payOrCredit).
     ///   A failed withdrawal reverts and preserves the credit.
+    /// @dev ROUND 10 (Oct 27, 2026): the withdrawal is verified against
+    ///   the escrow's balance, the same way _payOrCredit verifies a
+    ///   payout (see its note). A token that returns true (or empty)
+    ///   while moving nothing would otherwise zero the credit and emit
+    ///   Withdrawn while the funds never left — the credit would be
+    ///   silently dropped. Here the balance must drop by exactly
+    ///   `amount`; if it did not, the call reverts with "withdrawal
+    ///   failed" and the revert restores the credit in full, so a lying
+    ///   token can never eat a credit. (A token that moves the funds
+    ///   and then returns false still counts as paid — the funds left,
+    ///   so no credit is owed.)
     function withdraw(address token) external nonReentrant {
         uint256 amount = pendingWithdrawals[token][msg.sender];
         require(amount > 0, "nothing to withdraw");
         pendingWithdrawals[token][msg.sender] = 0;
-        require(_tryTransfer(token, msg.sender, amount), "withdrawal failed");
+        uint256 balanceBefore = _balanceOf(token);
+        _tryTransfer(token, msg.sender, amount);
+        uint256 balanceAfter = _balanceOf(token);
+        uint256 moved = balanceBefore > balanceAfter ? balanceBefore - balanceAfter : 0;
+        require(moved == amount, "withdrawal failed");
         emit Withdrawn(token, msg.sender, msg.sender, amount);
     }
 
@@ -346,12 +379,19 @@ contract AgentEscrow {
     ///   blocklisted: a transfer to it would fail again, so the credit
     ///   is pulled to an address the token accepts. Only the credited
     ///   party may move its own credit.
+    /// @dev Same ROUND 10 balance verification as withdraw(): the
+    ///   balance must drop by exactly `amount`, or the call reverts
+    ///   and the credit is restored in full.
     function withdrawTo(address token, address to) external nonReentrant {
         require(to != address(0), "zero address");
         uint256 amount = pendingWithdrawals[token][msg.sender];
         require(amount > 0, "nothing to withdraw");
         pendingWithdrawals[token][msg.sender] = 0;
-        require(_tryTransfer(token, to, amount), "withdrawal failed");
+        uint256 balanceBefore = _balanceOf(token);
+        _tryTransfer(token, to, amount);
+        uint256 balanceAfter = _balanceOf(token);
+        uint256 moved = balanceBefore > balanceAfter ? balanceBefore - balanceAfter : 0;
+        require(moved == amount, "withdrawal failed");
         emit Withdrawn(token, msg.sender, to, amount);
     }
 
@@ -403,6 +443,12 @@ contract AgentEscrow {
     ///   whose IMPLEMENTATION vanished still has code itself, so its
     ///   delegatecall can still return empty success — that case needs
     ///   a balance check, not a code check, and is out of scope here.
+    /// @dev ROUND 10 (Oct 27, 2026): _tryTransfer's return value is no
+    ///   longer the last word on a payout — _payOrCredit and withdraw /
+    ///   withdrawTo verify the escrow's balance actually moved (see
+    ///   their notes). A token can return true while moving nothing
+    ///   (MalformedReturnToken mode 6); the balance check, not the
+    ///   return value, is what keeps that lie from marking a job paid.
     function _tryTransfer(address token, address to, uint256 amount) internal returns (bool) {
         if (token.code.length == 0) return false;
         bytes memory data = abi.encodeWithSelector(IERC20.transfer.selector, to, amount);
@@ -439,16 +485,73 @@ contract AgentEscrow {
         return value == 1;
     }
 
+    /// @dev Balance read that never reverts, for the payout and
+    ///   withdrawal balance checks below. A token with no code, or one
+    ///   whose balanceOf reverts or returns garbage, reads as 0 — so
+    ///   the move is treated as zero and the payout is credited (or
+    ///   the withdrawal reverts) instead of the settlement bricking.
+    ///   A high-level IERC20(token).balanceOf() call would revert here:
+    ///   calling a dead token returns empty returndata, which the ABI
+    ///   decoder rejects as a uint256 — the exact case the round-9
+    ///   VanishingToken test covers, where release() must credit, not
+    ///   revert. Uses the same 32-byte-capped assembly call as
+    ///   _tryTransfer, so a huge return cannot run the caller out of
+    ///   gas on the copy.
+    function _balanceOf(address token) internal view returns (uint256 bal) {
+        bytes memory data = abi.encodeWithSelector(IERC20.balanceOf.selector, address(this));
+        bool success;
+        assembly {
+            success := staticcall(gas(), token, add(data, 0x20), mload(data), 0, 0x20)
+        }
+        if (!success) return 0;
+        uint256 size;
+        assembly { size := returndatasize() }
+        if (size != 32) return 0;
+        assembly {
+            let ptr := mload(0x40)
+            returndatacopy(ptr, 0, 32)
+            bal := mload(ptr)
+        }
+    }
+
     /// @dev Attempt a token payout; on failure, credit a pull balance
     ///   instead of reverting the settlement. The job is already in its
     ///   terminal state when this runs, so the recipient's funds are
     ///   never lost — they are pulled later with withdraw() / withdrawTo().
+    /// @dev ROUND 10 (Oct 27, 2026): the escrow's balance is the source
+    ///   of truth, not the token's return value. A token that returns
+    ///   true (or empty) while moving nothing — the lying-token case,
+    ///   proven by MalformedReturnToken mode 6 — must not mark the job
+    ///   paid: the balance check catches it and the payout is credited
+    ///   instead. The mirrored case is covered too: a token that moves
+    ///   the funds and then returns false still counts as paid, so it
+    ///   is never paid twice. Only the shortfall is credited — what the
+    ///   escrow still holds for this job — so the invariant always
+    ///   holds: escrow token balance == sum of unsettled job amounts +
+    ///   all pending credits. Assumes a token either moves the full
+    ///   amount or nothing (true of every token in the suite and of
+    ///   standard ERC-20s); a token that moved a partial amount would
+    ///   be credited only the shortfall, never the full amount.
+    /// @dev Why a balance check, not a stricter return rule: the return
+    ///   value is the token's claim about what it did; the balance is
+    ///   what actually happened. The code-length check (round 9) closed
+    ///   the vanished-code variant of the same lie; this closes the
+    ///   remaining variant — a live token that answers success and
+    ///   moves nothing — at the source, for every payout path at once.
+    ///   Balances are read with _balanceOf, never a high-level call:
+    ///   a dead token's empty returndata would revert the decoder and
+    ///   brick the settlement instead of crediting it.
     function _payOrCredit(address token, address to, uint256 amount) internal {
-        if (_tryTransfer(token, to, amount)) {
-            return;
+        uint256 balanceBefore = _balanceOf(token);
+        _tryTransfer(token, to, amount);
+        uint256 balanceAfter = _balanceOf(token);
+        uint256 moved = balanceBefore > balanceAfter ? balanceBefore - balanceAfter : 0;
+        if (moved >= amount) {
+            return; // the funds left the escrow: paid, whatever the return said
         }
-        pendingWithdrawals[token][to] += amount;
-        emit Credited(token, to, amount);
+        uint256 shortfall = amount - moved;
+        pendingWithdrawals[token][to] += shortfall;
+        emit Credited(token, to, shortfall);
     }
 
     /// @dev SafeERC20-style transferFrom: accepts an empty return value
@@ -497,6 +600,43 @@ contract AgentEscrow {
     ///   withdrawTo(), or 0 if there is no credit.
     function pendingCredit(address token, address account) external view returns (uint256 credit) {
         return pendingWithdrawals[token][account];
+    }
+
+    /// @notice The full settlement picture for a job in one call:
+    ///   its delivery timestamp, the two timestamps that bound the
+    ///   agent's claim and the dispute, and the pull balance the job's
+    ///   agent can withdraw for the job's token — so a caller never has
+    ///   to recompute windows or call claimWindows + getJob +
+    ///   pendingCredit separately.
+    /// @dev Grok improvement (round 10): claimWindows + pendingCredit
+    ///   in one multicall-friendly view. Before delivery
+    ///   (deliveredAt == 0) the window timestamps are 0 (same rule as
+    ///   claimWindows: the window offsets from 0 would look like 1970
+    ///   timestamps that have already passed); the credit is
+    ///   independent of delivery and is reported as-is. Boundary
+    ///   semantics, as in release / raiseDispute / settleDisputeTimeout:
+    ///   the agent may claim only when block.timestamp > agentClaimAt
+    ///   (strict); a dispute may be raised while block.timestamp <=
+    ///   agentClaimAt (inclusive); the arbiter may resolve while
+    ///   block.timestamp <= disputeTimeoutAt (inclusive); the timeout
+    ///   settles only when block.timestamp > disputeTimeoutAt (strict).
+    /// @return deliveredAt timestamp of submitDelivery; 0 until delivered
+    /// @return agentClaimAt deliveredAt + reviewWindow, or 0 if not delivered
+    /// @return disputeTimeoutAt deliveredAt + reviewWindow + DISPUTE_PERIOD, or 0 if not delivered
+    /// @return credit the pull balance of the job's agent for the job's token, or 0
+    function jobWindows(uint256 jobId) external view returns (
+        uint256 deliveredAt,
+        uint256 agentClaimAt,
+        uint256 disputeTimeoutAt,
+        uint256 credit
+    ) {
+        Job storage job = jobs[jobId];
+        deliveredAt = job.deliveredAt;
+        if (deliveredAt != 0) {
+            agentClaimAt = deliveredAt + job.reviewWindow;
+            disputeTimeoutAt = agentClaimAt + DISPUTE_PERIOD;
+        }
+        credit = pendingWithdrawals[job.token][job.agent];
     }
 
     function getJob(uint256 jobId) external view returns (Job memory) {

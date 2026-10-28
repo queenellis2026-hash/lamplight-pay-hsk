@@ -23,6 +23,12 @@ pragma solidity ^0.8.24;
 ///       credit path — a front-end must not hardcode a low gas limit
 ///       for release, since the token decides how much of the forwarded
 ///       gas it burns; measured in the mode-5 test)
+///     6 = transfer() returns TRUE but moves NO funds (round-10
+///       lying token: the return value claims success while the
+///       balance never changes — the exact lie the round-9 code-length
+///       check cannot catch, since this token has code. The escrow's
+///       round-10 balance check in _payOrCredit must catch it: the
+///       payout is credited, never marked paid.)
 ///   In the malformed modes the transfer moves NO funds: the token refused
 ///   the payout but answered with garbage instead of false, so the escrow
 ///   credits the pull balance and the job still reaches its terminal
@@ -57,7 +63,7 @@ contract MalformedReturnToken {
 
     function setMode(uint256 mode_) external {
         require(msg.sender == owner, "not owner");
-        require(mode_ <= 5, "bad mode");
+        require(mode_ <= 6, "bad mode");
         mode = mode_;
     }
 
@@ -106,6 +112,12 @@ contract MalformedReturnToken {
             assembly {
                 for { } 1 { } { }
             }
+        } else if (mode == 6) {
+            // Lying token: answer true, move nothing. The return value
+            // claims success while the balance never changes — the
+            // round-10 balance check in _payOrCredit must catch it and
+            // credit the payout instead of marking the job paid.
+            return true;
         }
     }
 

@@ -28,6 +28,51 @@ from a2a.quote import new_quote, quote_expired  # noqa: E402
 ONE = 1_000_000
 ZERO = "0x" + "0" * 40  # the zero address: no third-party arbiter (payer resolves)
 
+# Gas ceilings pinned by tests (measured on eth-tester/PyEVM, Oct 27, 2026;
+# see the _tryTransfer NatSpec). Ceilings, not exact figures — a future
+# solc version may shift gas a little, while a regression in the
+# bounded-copy or 1/64-retention behaviour blows straight past them.
+# Round 10 adds the mode-5 ceiling: the gas-burning token's release is
+# dominated by the token burning 63/64 of the forwarded gas, so the
+# ceiling sits just above the measured cost — a compiler change that
+# moves the escrow's retained-1/64 path by more than ~200k gas, or a
+# regression that makes the release revert, fails the test.
+GAS_CEILING_SMALL = 150_000       # small-return paths (clean + credited)
+GAS_CEILING_BOMB = 19_000_000     # ~3MB return-bomb path (token's own ~17.5M)
+GAS_CEILING_GAS_BURN = 19_900_000  # mode-5 gas-burning path, measured 19,697,418
+
+# Job states that still hold funds in the escrow (for the round-10
+# settlement invariant): Created, Accepted, Delivered, Disputed.
+_UNSETTLED_STATES = {0, 1, 2, 3}
+
+
+def _assert_invariant(env):
+    """Round 10 (Grok improvement 1): for every token, the escrow's
+    balance equals the sum of unsettled job amounts plus all pending
+    credits. A payout that claimed success without moving funds (or a
+    credit recorded for funds that already left) breaks this at once.
+    Enumerates every job and every account that could hold a credit
+    (accounts 0-9 cover all payout recipients the suite uses)."""
+    escrow = env["escrow"]
+    w3 = env["w3"]
+    tokens = [env["musdc"], env["fee"], env["nobool"],
+              env["blocklist"], env["hook"], env["malformed"]]
+    job_count = escrow.functions.jobCount().call()
+    for token in tokens:
+        unsettled = 0
+        for jid in range(job_count):
+            job = escrow.functions.getJob(jid).call()
+            if job[2].lower() == token.address.lower() and job[6] in _UNSETTLED_STATES:
+                unsettled += job[3]
+        credits = 0
+        for acct in w3.eth.accounts[:10]:
+            credits += escrow.functions.pendingWithdrawals(token.address, acct).call()
+        balance = token.functions.balanceOf(escrow.address).call()
+        assert balance == unsettled + credits, (
+            f"invariant broken for {token.address}: balance {balance} != "
+            f"unsettled {unsettled} + credits {credits}"
+        )
+
 
 @pytest.fixture(scope="module")
 def env():
@@ -209,12 +254,12 @@ def test_release_gas_clean_vs_credited_pins_bomb_fix(env):
     assert _state(env, jid) == 4
     assert escrow.functions.pendingWithdrawals(bad.address, fresh_bomb).call() == 10 * ONE
 
-    # Ceilings, not exact figures — see the docstring.
-    assert clean_gas <= 150_000
-    assert claim_gas <= 150_000
-    assert credited0_gas <= 150_000
-    assert credited2_gas <= 150_000
-    assert bomb_gas <= 19_000_000
+    # Ceilings, not exact figures — see the GAS_CEILING_* constants.
+    assert clean_gas <= GAS_CEILING_SMALL
+    assert claim_gas <= GAS_CEILING_SMALL
+    assert credited0_gas <= GAS_CEILING_SMALL
+    assert credited2_gas <= GAS_CEILING_SMALL
+    assert bomb_gas <= GAS_CEILING_BOMB
     # The credited path stays the same order of magnitude as the clean
     # path — a malformed return must not cost materially more than a
     # good one.
@@ -879,7 +924,7 @@ def test_return_bomb_three_mb_credits_instead_of_running_out_of_gas(env):
     # post-fix release costs 17,519,061 gas (the token's own ~17.5M to
     # return 3MB; the escrow copies at most 32 bytes). Anything near 35M
     # means the copy-everything behaviour is back.
-    assert rc["gasUsed"] <= 19_000_000
+    assert rc["gasUsed"] <= GAS_CEILING_BOMB
     assert _state(env, jid) == 4  # State.Released — not stranded
     assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 10 * ONE
     # the bomb transfer moved no funds, so the agent's balance is unchanged
@@ -919,11 +964,16 @@ def test_gas_burning_token_credits_when_release_supplies_enough_gas(env):
     assert rc["status"] == 0
     assert _state(env, jid) == 2  # State.Delivered — not settled
     assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 0
-    # High limit: succeeds and credits the full payout.
+    # High limit: succeeds and credits the full payout. The gas cost is
+    # pinned, not just bounded by the tx limit (round 10, Grok
+    # improvement 3): re-measured with the round-10 balance check at
+    # 19,697,418 gas, ceiling GAS_CEILING_GAS_BURN (19,900,000) — a
+    # future solc change that alters the 1/64 retention math is caught
+    # the same way the return-bomb regression is.
     tx = escrow.functions.release(jid).transact({"from": payer, "gas": 20_000_000})
     rc = env["w3"].eth.wait_for_transaction_receipt(tx)
     assert rc["status"] == 1
-    assert rc["gasUsed"] <= 20_000_000
+    assert rc["gasUsed"] <= GAS_CEILING_GAS_BURN
     assert _state(env, jid) == 4  # State.Released — credited, not stranded
     assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 10 * ONE
     assert bad.functions.balanceOf(agent).call() == before  # the burn moved no funds
@@ -1035,6 +1085,144 @@ def test_hook_calling_accept_job_cannot_brick_release(env):
     hook.functions.setHook(ZERO, b"").transact({"from": payer})
     escrow.functions.withdraw(hook.address).transact({"from": agent})
     assert escrow.functions.pendingWithdrawals(hook.address, agent).call() == 0
+
+
+# ---- Round 10 (Oct 27, 2026): Grok round-9 improvements ----
+
+def test_lying_token_returning_true_without_moving_funds_credits(env):
+    """Grok improvement 1 (round 10): a token that returns TRUE while
+    moving NOTHING (MalformedReturnToken mode 6) must not mark the job
+    paid. The round-9 code-length check cannot catch this — the token
+    has code, and its answer looks exactly like a successful transfer.
+    The round-10 balance check in _payOrCredit catches it: the escrow's
+    balance never dropped, so the payout is credited instead of being
+    treated as paid. The job still reaches Released — that is the
+    established pull-balance design (round 3): the settlement
+    completes, the funds are recorded as owed, and the agent pulls
+    them once the token behaves again. A job that stayed Delivered
+    instead would be stranded with no exit (a second release would
+    double-credit).
+    Verified against the old code: with the balance check removed the
+    release below marks the job Released with NO credit and the agent
+    unpaid — the funds silently lost. (See the round-10 record in
+    reviews-2026-10-27.md.)
+    The agent is a fresh account (accounts[4]) that has never held a
+    malformed-token credit."""
+    escrow, bad = env["escrow"], env["malformed"]
+    payer = env["payer"]
+    agent = env["w3"].eth.accounts[4]  # fresh: never credited before
+    bad.functions.setMode(3).transact({"from": payer})  # well-behaved for funding
+    before = bad.functions.balanceOf(agent).call()
+    credit_before = escrow.functions.pendingWithdrawals(bad.address, agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600, token=bad.address, agent=agent)
+    bad.functions.setMode(6).transact({"from": payer})  # lying: true, moves nothing
+    escrow.functions.release(jid).transact({"from": payer})
+    assert _state(env, jid) == 4  # State.Released — credited, not stranded
+    assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == credit_before + 10 * ONE
+    assert bad.functions.balanceOf(agent).call() == before  # the lie moved no funds
+    assert bad.functions.balanceOf(escrow.address).call() >= 10 * ONE  # still held
+    _assert_invariant(env)
+    # Once the token behaves again, the credit pays out in full.
+    bad.functions.setMode(3).transact({"from": payer})
+    escrow.functions.withdraw(bad.address).transact({"from": agent})
+    assert bad.functions.balanceOf(agent).call() == before + credit_before + 10 * ONE
+    assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 0
+    _assert_invariant(env)
+
+
+def test_lying_token_withdraw_cannot_drop_credit(env):
+    """Same lying-token hole, the withdraw leg (round 10 extension):
+    a token that answers true while moving nothing must not zero a
+    credit. withdraw() verifies the escrow's balance dropped by the
+    credit amount; on a lie it reverts with "withdrawal failed" and
+    the revert restores the credit in full, so the funds stay recorded
+    as owed instead of silently dropped."""
+    escrow, bad = env["escrow"], env["malformed"]
+    payer = env["payer"]
+    agent = env["w3"].eth.accounts[4]  # fresh: never credited before
+    bad.functions.setMode(3).transact({"from": payer})  # well-behaved for funding
+    before = bad.functions.balanceOf(agent).call()
+    credit_before = escrow.functions.pendingWithdrawals(bad.address, agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600, token=bad.address, agent=agent)
+    bad.functions.setMode(0).transact({"from": payer})  # malformed: credits on release
+    escrow.functions.release(jid).transact({"from": payer})
+    assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == credit_before + 10 * ONE
+    # Now the token lies on withdraw: answers true, moves nothing.
+    bad.functions.setMode(6).transact({"from": payer})
+    with pytest.raises(TransactionFailed, match="withdrawal failed"):
+        escrow.functions.withdraw(bad.address).transact({"from": agent})
+    assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == credit_before + 10 * ONE
+    assert bad.functions.balanceOf(agent).call() == before
+    # Once the token behaves again, the credit pays out in full.
+    bad.functions.setMode(3).transact({"from": payer})
+    escrow.functions.withdraw(bad.address).transact({"from": agent})
+    assert bad.functions.balanceOf(agent).call() == before + credit_before + 10 * ONE
+    assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 0
+
+
+def test_job_windows_view(env):
+    """Grok improvement (round 10): jobWindows(jobId) returns the full
+    settlement picture in one call — (deliveredAt, agentClaimAt,
+    disputeTimeoutAt, credit) — so a caller never recomputes windows or
+    calls claimWindows + getJob + pendingCredit separately. The triple
+    agrees with claimWindows(); the credit agrees with pendingCredit()."""
+    escrow, musdc, bad = env["escrow"], env["musdc"], env["malformed"]
+    payer, agent = env["payer"], env["agent"]
+    dispute_period = escrow.functions.DISPUTE_PERIOD().call()
+
+    # Undelivered job: all three timestamps are 0, credit is 0.
+    # (web3.py returns a list for a multi-value view, not a tuple.)
+    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 3600, 600, "ipfs://t", ZERO).transact({"from": payer})
+    jid0 = escrow.functions.jobCount().call() - 1
+    assert escrow.functions.jobWindows(jid0).call() == [0, 0, 0, 0]
+    assert escrow.functions.claimWindows(jid0).call() == [0, 0]
+
+    # Delivered job: the triple is deliveredAt + window (+ dispute period).
+    jid = _make_delivered(env, amount=10 * ONE, window=600)
+    job = escrow.functions.getJob(jid).call()
+    delivered_at = job[9]
+    assert escrow.functions.jobWindows(jid).call() == [
+        delivered_at, delivered_at + 600, delivered_at + 600 + dispute_period, 0]
+    assert escrow.functions.claimWindows(jid).call() == [
+        delivered_at + 600, delivered_at + 600 + dispute_period]
+
+    # Disputed job: the windows do not move; the credit is still 0.
+    escrow.functions.raiseDispute(jid).transact({"from": payer})
+    assert escrow.functions.jobWindows(jid).call() == [
+        delivered_at, delivered_at + 600, delivered_at + 600 + dispute_period, 0]
+
+    # Credited job: the triple is unchanged and the credit is the amount.
+    # (Delta over the credit the agent already holds, so the assertion
+    # does not depend on earlier tests having withdrawn.)
+    bad.functions.setMode(3).transact({"from": payer})  # well-behaved for funding
+    credit_before = escrow.functions.pendingCredit(bad.address, agent).call()
+    jid2 = _make_delivered(env, amount=10 * ONE, window=600, token=bad.address, agent=agent)
+    job2 = escrow.functions.getJob(jid2).call()
+    delivered_at2 = job2[9]
+    bad.functions.setMode(6).transact({"from": payer})  # lying: credits on release
+    escrow.functions.release(jid2).transact({"from": payer})
+    assert escrow.functions.jobWindows(jid2).call() == [
+        delivered_at2, delivered_at2 + 600, delivered_at2 + 600 + dispute_period,
+        credit_before + 10 * ONE]
+    assert escrow.functions.pendingCredit(bad.address, agent).call() == credit_before + 10 * ONE
+    # Withdrawing drains the credit in the view back to 0.
+    bad.functions.setMode(3).transact({"from": payer})
+    escrow.functions.withdraw(bad.address).transact({"from": agent})
+    assert escrow.functions.jobWindows(jid2).call()[3] == 0
+
+
+def test_settlement_invariant_holds(env):
+    """Grok improvement 1 (round 10), the complementary invariant test:
+    for every token, the escrow's balance equals the sum of unsettled
+    job amounts plus all pending credits. This runs over the whole
+    shared fixture — every job and credit the suite has created — so a
+    payout that claimed success without moving funds, or a credit
+    recorded for funds that already left, breaks it at once. It also
+    covers the fee token (stored amounts are net received, and the
+    escrow's balance drops by exactly the stored amount on payout)
+    and the leftover credits the gas test deliberately leaves in
+    place (its credited jobs are counted, not forgotten)."""
+    _assert_invariant(env)
 
 
 if __name__ == "__main__":

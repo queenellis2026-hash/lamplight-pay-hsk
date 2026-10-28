@@ -95,7 +95,7 @@ scripts/
   demo.py               3 end-to-end scenarios on a local EVM, writes receipts
   deploy_hsk_testnet.py deploy to HSK testnet (chain 133) — see below
 tests/
-  test_flow.py          48 tests: happy path, timeout refund, stranger guard,
+  test_flow.py          56 tests: happy path, timeout refund, stranger guard,
                     quote, review-window lifecycle, review-window cap (30
                     days) + boundary, fee/no-bool tokens,
                     cancelUnaccepted, mint access control, blocklisted
@@ -105,10 +105,18 @@ tests/
                     (32-byte value 2, 1-byte return, 10,000-byte return)
                     credit instead of stranding, a 3,000,000-byte
                     return-bomb credits instead of running out of gas,
+                    a gas-burning token (mode 5) credits when the release
+                    supplies enough gas, a vanished-code token credits
+                    instead of marking paid, a lying token (mode 6:
+                    returns true, moves nothing) credits instead of
+                    marking paid — caught by the balance-delta check in
+                    _payOrCredit, which also verifies withdrawals —
                     cross-function
                     reentrancy (hook calling raiseDispute / acceptJob),
                     zero-address agent guard, claimWindows (0, 0) before
-                    delivery
+                    delivery, the jobWindows combined view, and the
+                    settlement invariant (escrow balance == unsettled
+                    jobs + pending credits)
 demo-receipts/          quote + receipts produced by the demo run
 ```
 
@@ -118,7 +126,7 @@ demo-receipts/          quote + receipts produced by the demo run
 python3 -m venv .venv && .venv/bin/pip install web3 eth-tester py-solc-x py-evm pytest
 .venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 19,746 B
 .venv/bin/python scripts/demo.py      # 3 scenarios, all pass
-.venv/bin/python -m pytest tests/ -v  # 49 passed
+.venv/bin/python -m pytest tests/ -v  # 56 passed
 ```
 
 Demo result (local EVM, real tx hashes in `demo-receipts/`):
@@ -214,16 +222,33 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   is pinned too: with a 20M gas limit the release costs 19,695,562 gas
   and credits, with 200k it reverts — a front-end must not hardcode a
   low gas limit. The `pendingCredit` test now uses fresh accounts so it
-  no longer depends on earlier tests having withdrawn.) A failing payout
+  no longer depends on earlier tests having withdrawn.) (Round 10:
+  `_payOrCredit` — and `withdraw()` / `withdrawTo()` — now verify the
+  escrow's balance actually dropped by the payout amount, instead of
+  trusting the token's return value: a token that returns true while
+  moving nothing (new `MalformedReturnToken` mode 6, the lying token)
+  is caught and the payout is credited, never marked paid — proven by
+  a test that fails with the check removed. Only the shortfall is
+  credited, so the invariant holds: escrow balance == unsettled jobs +
+  pending credits, locked in by a dedicated invariant test. A
+  `jobWindows()` view returns (deliveredAt, agentClaimAt,
+  disputeTimeoutAt, credit) in one call. The gas ceilings are now
+  named constants in the tests, the mode-5 path has its own ceiling
+  (19,900,000; re-measured 19,697,418), and the exact boundary
+  semantics (strict > vs inclusive <=) are documented in the NatSpec
+  of release / raiseDispute / resolveDispute / settleDisputeTimeout.)
+  A failing payout
   leg credits a pull
   balance instead of stranding the job, and `MockUSDC` mint is
   owner-gated. The agent may never be the zero address (its own guard,
-  symmetric with the token check). 52 tests cover every new path,
+  symmetric with the token check). 56 tests cover every new path,
   including the previously untested ones (release while Disputed, both
   resolve directions, early timeout, cancel, window of 0, reentrancy
   through a hook token, cross-function reentrancy through a hook calling
   raiseDispute or acceptJob, and malformed-return tokens in all three
-  shapes plus the 3,000,000-byte return bomb).
+  shapes plus the 3,000,000-byte return bomb, the gas-burning token,
+  the vanished-code token, and the lying token — returns true, moves
+  nothing, caught by the balance-delta check).
   Full verbatim findings: `reviews-2026-10-27.md`. Note: the
   contracts deployed on HSK testnet (above) are the PRE-fix version —
   redeploy is needed before demo selection for the on-chain code to match
