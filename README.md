@@ -118,7 +118,7 @@ demo-receipts/          quote + receipts produced by the demo run
 python3 -m venv .venv && .venv/bin/pip install web3 eth-tester py-solc-x py-evm pytest
 .venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 19,746 B
 .venv/bin/python scripts/demo.py      # 3 scenarios, all pass
-.venv/bin/python -m pytest tests/ -v  # 48 passed
+.venv/bin/python -m pytest tests/ -v  # 49 passed
 ```
 
 Demo result (local EVM, real tx hashes in `demo-receipts/`):
@@ -197,10 +197,15 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   return-bomb test: pre-fix, release consumed all 30M gas and reverted.
   The assembly call caps the copy at 32 bytes; post-fix the same release
   costs 17,519,061 gas — the token's own cost to return 3MB — and the
-  payout credits.) A failing payout leg credits a pull
+  payout credits. (Round 7: the fix is now pinned with gas-cost
+  assertions — a new test measures clean vs credited release gas on the
+  cold path and asserts ceilings of 150,000 gas for the small-return
+  paths and 19,000,000 for the bomb, so a future solc change cannot
+  silently regress the assembly call; the bomb test itself also asserts
+  gasUsed ≤ 19,000,000.) A failing payout leg credits a pull
   balance instead of stranding the job, and `MockUSDC` mint is
   owner-gated. The agent may never be the zero address (its own guard,
-  symmetric with the token check). 48 tests cover every new path,
+  symmetric with the token check). 49 tests cover every new path,
   including the previously untested ones (release while Disputed, both
   resolve directions, early timeout, cancel, window of 0, reentrancy
   through a hook token, cross-function reentrancy through a hook calling

@@ -306,3 +306,33 @@ nice-to-have, not needed for the demo).
   (now six fix rounds behind source) — redeploy + Build edit are
   separate steps. No GitHub push and no Build edit were made in
   this task.
+
+## Round-7 fix (Oct 27, 2026)
+
+- **Gas-cost assertions pin the bomb fix (Grok improvement 3):** new
+  test `test_release_gas_clean_vs_credited_pins_bomb_fix` measures
+  release() gasUsed on the cold path (fresh agent, zero token balance)
+  for five paths — clean payer release 75,800; clean agent-claim
+  release 77,613; credited mode 0 73,015; credited mode 2 (10KB return)
+  74,075; bomb mode 4 (~3MB return) 17,519,073 — and asserts ceilings,
+  not exact figures: 150,000 gas for the small-return paths (~2x
+  headroom for compiler drift) and 19,000,000 for the bomb (the token's
+  own ~17.5M to return 3MB is unavoidable; the escrow pays nothing on
+  top, so anything near the ~35M the old code needed means the
+  copy-everything behaviour is back). It also asserts each credited
+  release costs less than 3x the clean release, so a malformed return
+  stays the same order of magnitude as a good one. The existing bomb
+  test now also asserts gasUsed ≤ 19,000,000 directly. To support the
+  fresh-agent measurements, `_make_delivered` takes an optional
+  `agent` parameter (defaults to the standard agent account).
+- **Skipped:** Grok improvement 2 (a "what can I do next" view) —
+  `lifecycleStatus`/`claimWindows` already cover most of it; Grok's
+  features (bonded-stake arbiter, batch release/refund) are v2, NOT
+  built here. Claude's round-6 findings are still pending (resume
+  after the 9:00 PM CDT limit reset) and are NOT part of this round.
+- **Tests: 49 passed, 0 failed** (48 before + 1 new gas test). Demo
+  re-run: 3/3 scenarios + stranger guard pass, final balances unchanged
+  (payer 9920 / agent 80 / escrow 0) — the v3 video is NOT stale (the
+  demo never uses the malformed token). The HSK contract itself did NOT
+  change in this round (tests only), so no build artifacts were
+  recompiled and no redeploy is newly owed beyond the existing one.

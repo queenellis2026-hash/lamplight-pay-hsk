@@ -67,11 +67,14 @@ def _travel(env, seconds):
     env["tester"].mine_blocks(1)
 
 
-def _make_delivered(env, amount=10 * ONE, deadline=3600, window=600, token=None, arbiter=None):
+def _make_delivered(env, amount=10 * ONE, deadline=3600, window=600, token=None, arbiter=None, agent=None):
     """Fund + accept + deliver a job; returns its job id.
-    arbiter defaults to the zero address (payer-as-arbiter, as before)."""
+    arbiter defaults to the zero address (payer-as-arbiter, as before);
+    agent defaults to the standard agent account — pass a fresh account
+    for a cold-path measurement."""
     escrow = env["escrow"]
-    payer, agent = env["payer"], env["agent"]
+    payer = env["payer"]
+    agent = agent or env["agent"]
     token = token or env["musdc"].address
     escrow.functions.createJob(agent, token, amount, deadline, window, "ipfs://t",
                                arbiter or ZERO).transact({"from": payer})
@@ -136,6 +139,87 @@ def test_agent_cannot_claim_before_window_ends(env):
     jid = _make_delivered(env, amount=10 * ONE, window=600)
     with pytest.raises(TransactionFailed, match="review window not ended"):
         env["escrow"].functions.release(jid).transact({"from": env["agent"]})
+
+
+def test_release_gas_clean_vs_credited_pins_bomb_fix(env):
+    """Grok improvement 3 (round 6): pin the bomb fix with gas-cost
+    assertions on the review-window boundary paths. A clean release
+    (well-behaved token, direct transfer) and credited releases
+    (malformed token, payout fails and credits) are measured on the
+    cold path — a fresh agent whose token balance is zero — and asserted
+    against ceilings, not exact figures: a future solc version may shift
+    gas a little without breaking the test, while a return to the old
+    copy-everything returndata behaviour (which needed ~35M gas for a
+    3MB return and ran out of gas at a 30M limit) blows straight past
+    the bomb ceiling.
+    Measured on this toolchain (eth-tester/PyEVM, Oct 27, 2026):
+    clean payer release 75,800; clean agent-claim release 77,613;
+    credited mode 0 73,015; credited mode 2 (10KB return) 74,075;
+    bomb mode 4 (~3MB return) 17,519,073. Ceilings: 150,000 for the
+    small-return paths (~2x headroom), 19,000,000 for the bomb (the
+    token's own ~17.5M to return 3MB is unavoidable; the escrow pays
+    nothing on top, so anything near 35M means the copy is back)."""
+    escrow, musdc, bad = env["escrow"], env["musdc"], env["malformed"]
+    payer = env["payer"]
+    w3 = env["w3"]
+
+    def _gas(tx_hash):
+        return w3.eth.wait_for_transaction_receipt(tx_hash)["gasUsed"]
+
+    # Clean release, payer releases to a fresh agent (cold path).
+    fresh_clean = w3.eth.accounts[5]
+    jid = _make_delivered(env, amount=10 * ONE, window=600, agent=fresh_clean)
+    clean_gas = _gas(escrow.functions.release(jid).transact({"from": payer}))
+    assert _state(env, jid) == 4
+    assert musdc.functions.balanceOf(fresh_clean).call() == 10 * ONE
+
+    # Clean release, agent claims after the review window (boundary path).
+    fresh_claim = w3.eth.accounts[6]
+    jid = _make_delivered(env, amount=10 * ONE, window=600, agent=fresh_claim)
+    _travel(env, 700)
+    claim_gas = _gas(escrow.functions.release(jid).transact({"from": fresh_claim}))
+    assert _state(env, jid) == 4
+    assert musdc.functions.balanceOf(fresh_claim).call() == 10 * ONE
+
+    # Credited release, malformed mode 0 (32 bytes holding 2), fresh agent.
+    fresh_bad0 = w3.eth.accounts[7]
+    jid = _make_delivered(env, amount=10 * ONE, window=600, token=bad.address, agent=fresh_bad0)
+    bad.functions.setMode(0).transact({"from": payer})
+    credited0_gas = _gas(escrow.functions.release(jid).transact({"from": payer}))
+    assert _state(env, jid) == 4
+    assert escrow.functions.pendingWithdrawals(bad.address, fresh_bad0).call() == 10 * ONE
+
+    # Credited release, malformed mode 2 (10KB return), fresh agent —
+    # returndata size must not move the needle.
+    fresh_bad2 = w3.eth.accounts[8]
+    jid = _make_delivered(env, amount=10 * ONE, window=600, token=bad.address, agent=fresh_bad2)
+    bad.functions.setMode(2).transact({"from": payer})
+    credited2_gas = _gas(escrow.functions.release(jid).transact({"from": payer}))
+    assert _state(env, jid) == 4
+    assert escrow.functions.pendingWithdrawals(bad.address, fresh_bad2).call() == 10 * ONE
+
+    # Bomb credited release, mode 4 (~3MB return), fresh agent.
+    fresh_bomb = w3.eth.accounts[9]
+    jid = _make_delivered(env, amount=10 * ONE, window=600, token=bad.address, agent=fresh_bomb)
+    bad.functions.setMode(4).transact({"from": payer})
+    tx = escrow.functions.release(jid).transact({"from": payer, "gas": 20_000_000})
+    rc = w3.eth.wait_for_transaction_receipt(tx)
+    assert rc["status"] == 1
+    bomb_gas = rc["gasUsed"]
+    assert _state(env, jid) == 4
+    assert escrow.functions.pendingWithdrawals(bad.address, fresh_bomb).call() == 10 * ONE
+
+    # Ceilings, not exact figures — see the docstring.
+    assert clean_gas <= 150_000
+    assert claim_gas <= 150_000
+    assert credited0_gas <= 150_000
+    assert credited2_gas <= 150_000
+    assert bomb_gas <= 19_000_000
+    # The credited path stays the same order of magnitude as the clean
+    # path — a malformed return must not cost materially more than a
+    # good one.
+    assert credited0_gas < 3 * clean_gas
+    assert credited2_gas < 3 * clean_gas
 
 
 def test_dispute_after_window_reverts(env):
@@ -754,6 +838,11 @@ def test_return_bomb_three_mb_credits_instead_of_running_out_of_gas(env):
     tx = escrow.functions.release(jid).transact({"from": payer, "gas": 20_000_000})
     rc = env["w3"].eth.wait_for_transaction_receipt(tx)
     assert rc["status"] == 1  # succeeds inside 20M gas; the old code OOG'd at 30M
+    # Pin the fix with a gas ceiling, not just the tx limit: the measured
+    # post-fix release costs 17,519,061 gas (the token's own ~17.5M to
+    # return 3MB; the escrow copies at most 32 bytes). Anything near 35M
+    # means the copy-everything behaviour is back.
+    assert rc["gasUsed"] <= 19_000_000
     assert _state(env, jid) == 4  # State.Released — not stranded
     assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 10 * ONE
     # the bomb transfer moved no funds, so the agent's balance is unchanged
