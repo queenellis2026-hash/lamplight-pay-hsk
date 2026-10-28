@@ -16,6 +16,13 @@ pragma solidity ^0.8.24;
 ///       copies the full returndata into memory before the bounded
 ///       inspection caps it — if so, a megabyte-scale return runs the
 ///       settlement out of gas instead of crediting it)
+///     5 = transfer() burns all forwarded gas in an infinite loop
+///       (round-9 gas-burning token: the escrow's _tryTransfer forwards
+///       all remaining gas with the call, so the token consumes 63/64
+///       of it and the call fails; the escrow keeps its 1/64 to run the
+///       credit path — a front-end must not hardcode a low gas limit
+///       for release, since the token decides how much of the forwarded
+///       gas it burns; measured in the mode-5 test)
 ///   In the malformed modes the transfer moves NO funds: the token refused
 ///   the payout but answered with garbage instead of false, so the escrow
 ///   credits the pull balance and the job still reaches its terminal
@@ -50,7 +57,7 @@ contract MalformedReturnToken {
 
     function setMode(uint256 mode_) external {
         require(msg.sender == owner, "not owner");
-        require(mode_ <= 4, "bad mode");
+        require(mode_ <= 5, "bad mode");
         mode = mode_;
     }
 
@@ -89,6 +96,15 @@ contract MalformedReturnToken {
             // 32-byte-capped copy costs almost nothing.
             assembly {
                 return(0, 3000000)
+            }
+        } else if (mode == 5) {
+            // Gas-burning token: loop forever. The call runs out of gas,
+            // so _tryTransfer fails and the payout is credited — but only
+            // if the caller supplied enough gas that the escrow's
+            // retained 1/64 still covers the credit path (measured in
+            // the mode-5 test; a low gas limit reverts instead).
+            assembly {
+                for { } 1 { } { }
             }
         }
     }

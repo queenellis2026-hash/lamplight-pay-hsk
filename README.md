@@ -205,10 +205,20 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   gasUsed ≤ 19,000,000.) A `pendingCredit(token, account)` view (round 8)
   gives front-ends the pull balance directly, and the gas ceilings are
   now documented in the contract's NatSpec as a tripwire for future solc
-  upgrades. A failing payout leg credits a pull
+  upgrades. (Round 9: `_tryTransfer` now refuses a token whose code has
+  vanished after funding — a code-less address answers with empty
+  success, which the USDT-style rule would read as "paid"; a new
+  `VanishingToken` test token proves the release credits instead of
+  marking paid, run on a pre-Cancun (Shanghai) chain where SELFDESTRUCT
+  still deletes code. A gas-burning token mode (mode 5, infinite loop)
+  is pinned too: with a 20M gas limit the release costs 19,695,562 gas
+  and credits, with 200k it reverts — a front-end must not hardcode a
+  low gas limit. The `pendingCredit` test now uses fresh accounts so it
+  no longer depends on earlier tests having withdrawn.) A failing payout
+  leg credits a pull
   balance instead of stranding the job, and `MockUSDC` mint is
   owner-gated. The agent may never be the zero address (its own guard,
-  symmetric with the token check). 50 tests cover every new path,
+  symmetric with the token check). 52 tests cover every new path,
   including the previously untested ones (release while Disputed, both
   resolve directions, early timeout, cancel, window of 0, reentrancy
   through a hook token, cross-function reentrancy through a hook calling

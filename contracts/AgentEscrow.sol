@@ -383,7 +383,28 @@ contract AgentEscrow {
     ///   the ~35M the old copy-everything behaviour needed means the bomb
     ///   fix regressed — and these numbers in the NatSpec are the
     ///   tripwire that says so.
+    /// @dev ROUND 9 (Oct 27, 2026): the same 1/64 arithmetic bounds the
+    ///   gas-burning token case (MalformedReturnToken mode 5, infinite
+    ///   loop). The token consumes 63/64 of the forwarded gas and the
+    ///   call fails, so the release credits — but only if the caller
+    ///   supplied enough gas that the retained 1/64 still covers the
+    ///   credit path. Measured (eth-tester/PyEVM, Oct 27, 2026): with a
+    ///   20,000,000 gas limit the release costs 19,695,562 gas and
+    ///   succeeds; with 200,000 it reverts and the job stays Delivered.
+    ///   A front-end must not hardcode a low gas limit for release.
+    /// @dev ROUND 9 (Oct 27, 2026): refuse the call up front when the
+    ///   token has no code at all. A token address whose code has
+    ///   vanished after funding answers a call with success and empty
+    ///   returndata, which the USDT-style rule in
+    ///   _lastCallReturnedTrue() reads as "paid" — so the job would be
+    ///   marked settled while nothing moved and the funds would sit in
+    ///   the escrow with no credit recorded. Limit, stated plainly:
+    ///   this only sees the TOKEN address's own code. A proxy token
+    ///   whose IMPLEMENTATION vanished still has code itself, so its
+    ///   delegatecall can still return empty success — that case needs
+    ///   a balance check, not a code check, and is out of scope here.
     function _tryTransfer(address token, address to, uint256 amount) internal returns (bool) {
+        if (token.code.length == 0) return false;
         bytes memory data = abi.encodeWithSelector(IERC20.transfer.selector, to, amount);
         bool success;
         assembly {

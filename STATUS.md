@@ -366,3 +366,45 @@ nice-to-have, not needed for the demo).
   recompiled (`scripts/compile.py`); AgentEscrow bytecode 19,934 B
   (was 19,746 B after round 6 — the view adds 188 B). No GitHub push
   and no Build edit were made in this task.
+
+## Round 9 — Claude round-8 improvements (all 3) — DONE Oct 27, 2026 (evening)
+
+- **Code-length check in `_tryTransfer` (Claude improvement 1):** a
+  token address whose code has vanished after funding answers a call
+  with success and empty returndata, which the USDT-style rule reads as
+  "paid" — the job would be marked settled while nothing moved. `_tryTransfer`
+  now returns false up front when `token.code.length == 0`, so the
+  payout fails and the job is credited instead. Proved by a new test
+  with a `VanishingToken` test token (minimal ERC-20 + `kill()`
+  self-destruct), run on a pre-Cancun (Shanghai) chain in a separate
+  tester: there SELFDESTRUCT deletes the code (on the default Prague
+  tester EIP-6780 makes the code survive the kill — the same reason the
+  hole is nearly unreachable on modern mainnet). The test was verified
+  to FAIL with the check removed and PASS with it restored. The credit
+  itself can never be withdrawn — the token is dead — but the funds stay
+  recorded as owed, not silently marked paid. Limit, stated plainly in
+  the NatSpec: the check only sees the TOKEN address's own code; a proxy
+  whose implementation vanished still has code itself, so its
+  delegatecall can still return empty success — that case needs a
+  balance check, not a code check, and is out of scope here.
+- **Gas-burning token pinned (Claude improvement 2):** new
+  `MalformedReturnToken` mode 5 (infinite loop — burns all forwarded
+  gas) plus a test: with a 20,000,000 gas limit the release costs
+  19,695,562 gas, succeeds, and credits the full payout; with 200,000
+  it reverts and the job stays Delivered, unsettled, retryable with more
+  gas. Measured, not estimated (Claude's ~2M retained-gas estimate was
+  unmeasured). NatSpec line added to `_tryTransfer` — a front-end must
+  not hardcode a low gas limit for release.
+- **Shared test state reduced (Claude improvement 3):** the
+  `pendingCredit` test now uses fresh accounts (accounts[3]/[4]) that no
+  earlier test has credited, so its "0 before the credit" assertions no
+  longer depend on earlier tests having withdrawn. (On the Arc side, the
+  two gas-guard boundary tests now derive their limits from
+  `_minGasForDirectPay` instead of hardcoding them.)
+- **Tests: 52 passed, 0 failed** (50 before + 2 new: mode-5 gas-burning
+  and vanished-code). Demo re-run: 3/3 scenarios + stranger guard pass,
+  final balances unchanged (payer 9920 / agent 80 / escrow 0) — the v3
+  video is NOT stale. Build artifacts recompiled (`scripts/compile.py`,
+  now including `VanishingToken`); AgentEscrow bytecode 19,973 B (was
+  19,934 B after round 8 — the code-length check adds 39 B). No GitHub
+  push and no Build edit were made in this task.

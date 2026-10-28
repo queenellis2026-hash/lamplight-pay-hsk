@@ -819,16 +819,24 @@ def test_pending_credit_view_reports_pull_balance(env):
     """Grok improvement 2 (round 8): pendingCredit(token, account) is
     the named front-end view over the public pendingWithdrawals mapping.
     A credited payout shows the exact amount; an account or token with
-    no credit reads 0; withdrawing drains it back to 0."""
+    no credit reads 0; withdrawing drains it back to 0.
+    Round 9 (Claude improvement 3): the agent and the stranger are
+    FRESH accounts (accounts[3]/[4]) that no earlier test has credited —
+    the module-scoped fixture used to mean the "0 before the credit"
+    assertions only held because earlier tests had withdrawn, so this
+    test depended on their cleanup. accounts[3] is used elsewhere only
+    as an arbiter (never a payout recipient) and accounts[4] only as a
+    direct-pay recipient, so neither has ever held a credit."""
     escrow, bad = env["escrow"], env["malformed"]
-    payer, agent = env["payer"], env["agent"]
-    stranger = env["w3"].eth.accounts[2]
+    payer = env["payer"]
+    agent = env["w3"].eth.accounts[3]  # fresh: never credited before
+    stranger = env["w3"].eth.accounts[4]  # fresh: never credited before
     bad.functions.setMode(3).transact({"from": payer})  # well-behaved for funding
     # no credit anywhere before the job
     assert escrow.functions.pendingCredit(bad.address, agent).call() == 0
     assert escrow.functions.pendingCredit(bad.address, stranger).call() == 0
     assert escrow.functions.pendingCredit(env["musdc"].address, agent).call() == 0
-    jid = _make_delivered(env, amount=10 * ONE, window=600, token=bad.address)
+    jid = _make_delivered(env, amount=10 * ONE, window=600, token=bad.address, agent=agent)
     bad.functions.setMode(0).transact({"from": payer})  # 32 bytes holding 2
     escrow.functions.release(jid).transact({"from": payer})
     assert _state(env, jid) == 4  # State.Released — credited, not stranded
@@ -881,6 +889,106 @@ def test_return_bomb_three_mb_credits_instead_of_running_out_of_gas(env):
     escrow.functions.withdraw(bad.address).transact({"from": agent})
     assert bad.functions.balanceOf(agent).call() == before + 10 * ONE
     assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 0
+
+
+def test_gas_burning_token_credits_when_release_supplies_enough_gas(env):
+    """Claude improvement 2 (round 9): a token that burns all forwarded
+    gas (mode 5, infinite loop). _tryTransfer forwards all remaining gas
+    with the call, so the token consumes 63/64 of it and the call fails;
+    the escrow keeps its 1/64 to run the credit path — but only if the
+    caller supplied enough gas. Measured on this toolchain
+    (eth-tester/PyEVM, Oct 27, 2026): with a 20,000,000 gas limit the
+    release costs 19,695,562 gas, succeeds, and credits the full payout
+    (the token burns ~19.65M of the limit; the escrow pays only the
+    credit path on top). With a 200,000 gas limit the retained 1/64
+    (~3k) cannot cover the credit path and the release reverts instead
+    — the job stays Delivered, unsettled, and retryable with more gas.
+    A front-end must not hardcode a low gas limit for release.
+    The agent is a fresh account (accounts[4]) that has never held a
+    malformed-token credit."""
+    escrow, bad = env["escrow"], env["malformed"]
+    payer = env["payer"]
+    agent = env["w3"].eth.accounts[4]  # fresh: never credited before
+    bad.functions.setMode(3).transact({"from": payer})  # well-behaved for funding
+    before = bad.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600, token=bad.address, agent=agent)
+    bad.functions.setMode(5).transact({"from": payer})
+    # Low limit first: must revert, job stays Delivered and unsettled.
+    tx = escrow.functions.release(jid).transact({"from": payer, "gas": 200_000})
+    rc = env["w3"].eth.wait_for_transaction_receipt(tx)
+    assert rc["status"] == 0
+    assert _state(env, jid) == 2  # State.Delivered — not settled
+    assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 0
+    # High limit: succeeds and credits the full payout.
+    tx = escrow.functions.release(jid).transact({"from": payer, "gas": 20_000_000})
+    rc = env["w3"].eth.wait_for_transaction_receipt(tx)
+    assert rc["status"] == 1
+    assert rc["gasUsed"] <= 20_000_000
+    assert _state(env, jid) == 4  # State.Released — credited, not stranded
+    assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 10 * ONE
+    assert bad.functions.balanceOf(agent).call() == before  # the burn moved no funds
+    # once the token behaves again, the credit pays out in full
+    bad.functions.setMode(3).transact({"from": payer})
+    escrow.functions.withdraw(bad.address).transact({"from": agent})
+    assert bad.functions.balanceOf(agent).call() == before + 10 * ONE
+    assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 0
+
+
+def test_vanished_code_token_credits_instead_of_marking_paid():
+    """Claude improvement 1 (round 9): a token whose code has vanished
+    after funding answers a call with success and empty returndata —
+    which the USDT-style empty-return rule would read as "paid", so the
+    job would be marked settled while nothing moved and the funds would
+    sit in the escrow with no credit recorded. _tryTransfer now refuses
+    the call up front when the token has no code (token.code.length == 0),
+    so the payout fails and the job is credited instead.
+    Proved on a pre-Cancun (Shanghai) chain in a separate tester: there
+    SELFDESTRUCT deletes the code (on the default Prague tester EIP-6780
+    makes the code survive the kill — the same reason the hole is nearly
+    unreachable on modern mainnet). Before this fix the release below
+    marked the job paid with no credit; after it, the job is Released
+    with the full credit recorded. The credit itself can never be
+    withdrawn — the token is dead, so withdraw() also fails the code
+    check — but the funds are recorded as owed, not silently marked paid.
+    Limit, stated plainly: the check only sees the TOKEN address's own
+    code — a proxy whose implementation vanished still has code itself,
+    so its delegatecall can still return empty success. That case needs
+    a balance check, not a code check, and is out of scope here."""
+    from eth.vm.forks import ShanghaiVM
+    tester2 = EthereumTester(PyEVMBackend(vm_configuration=((0, ShanghaiVM),)))
+    w3 = Web3(EthereumTesterProvider(tester2))
+    payer, agent = w3.eth.accounts[0], w3.eth.accounts[1]
+
+    def artifact(name):
+        return json.loads((ROOT / "build" / f"{name}.json").read_text())
+
+    def deploy(name):
+        a = artifact(name)
+        c = w3.eth.contract(abi=a["abi"], bytecode=a["bin"])
+        tx = c.constructor().transact({"from": payer})
+        rc = w3.eth.wait_for_transaction_receipt(tx)
+        return w3.eth.contract(address=rc.contractAddress, abi=a["abi"])
+
+    escrow = deploy("AgentEscrow")
+    token = deploy("VanishingToken")
+    token.functions.mint(payer, 10_000 * ONE).transact({"from": payer})
+    token.functions.approve(escrow.address, 10_000 * ONE).transact({"from": payer})
+    escrow.functions.createJob(agent, token.address, 10 * ONE, 3600, 600,
+                               "ipfs://t", ZERO).transact({"from": payer})
+    jid = escrow.functions.jobCount().call() - 1
+    escrow.functions.acceptJob(jid).transact({"from": agent})
+    escrow.functions.submitDelivery(jid, Web3.keccak(text="deliverable")).transact({"from": agent})
+    assert w3.eth.get_code(token.address) != b""  # code present at funding
+    token.functions.kill().transact({"from": payer})
+    assert w3.eth.get_code(token.address) == b""  # code gone after the kill
+    escrow.functions.release(jid).transact({"from": payer})
+    assert escrow.functions.getJob(jid).call()[6] == 4  # State.Released — credited
+    assert escrow.functions.pendingWithdrawals(token.address, agent).call() == 10 * ONE
+    # the dead token can never pay the credit out — withdraw fails loudly
+    # instead of silently dropping it — so the funds stay recorded as owed
+    with pytest.raises(TransactionFailed, match="withdrawal failed"):
+        escrow.functions.withdraw(token.address).transact({"from": agent})
+    assert escrow.functions.pendingWithdrawals(token.address, agent).call() == 10 * ONE
 
 
 def _hook_calldata(env, fn_name, jid):
