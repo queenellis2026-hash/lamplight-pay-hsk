@@ -29,7 +29,11 @@ Lamplight Pay is a minimal, auditable settlement layer for agent-to-agent work:
    deadline passes with no delivery, reclaims them. Either side can raise a
    dispute after delivery; whoever the job names as arbiter resolves it
    (release or refund) — the requester by default, or an optional
-   third-party arbiter set at creation.
+   arbiter address set at creation. Note: the contract only checks the
+   arbiter is neither the payer nor the agent — that does not prove it
+   is an independent party, since the payer could name a second wallet
+   they control. The agent should read the job's arbiter before
+   accepting and only take jobs whose arbiter it trusts.
 5. **Receipt (off-chain).** Both sides keep a hash-stable settlement receipt:
    who paid whom, how much, for what, on which chain, with the tx hash as proof.
 
@@ -91,7 +95,7 @@ scripts/
   demo.py               3 end-to-end scenarios on a local EVM, writes receipts
   deploy_hsk_testnet.py deploy to HSK testnet (chain 133) — see below
 tests/
-  test_flow.py          47 tests: happy path, timeout refund, stranger guard,
+  test_flow.py          48 tests: happy path, timeout refund, stranger guard,
                     quote, review-window lifecycle, review-window cap (30
                     days) + boundary, fee/no-bool tokens,
                     cancelUnaccepted, mint access control, blocklisted
@@ -99,7 +103,9 @@ tests/
                     balance, job reaches a terminal state, agent recovers
                     via withdrawTo/withdraw, malformed-return tokens
                     (32-byte value 2, 1-byte return, 10,000-byte return)
-                    credit instead of stranding, cross-function
+                    credit instead of stranding, a 3,000,000-byte
+                    return-bomb credits instead of running out of gas,
+                    cross-function
                     reentrancy (hook calling raiseDispute / acceptJob),
                     zero-address agent guard, claimWindows (0, 0) before
                     delivery
@@ -110,9 +116,9 @@ demo-receipts/          quote + receipts produced by the demo run
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install web3 eth-tester py-solc-x py-evm pytest
-.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 20,001 B
+.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 19,746 B
 .venv/bin/python scripts/demo.py      # 3 scenarios, all pass
-.venv/bin/python -m pytest tests/ -v  # 47 passed
+.venv/bin/python -m pytest tests/ -v  # 48 passed
 ```
 
 Demo result (local EVM, real tx hashes in `demo-receipts/`):
@@ -151,11 +157,15 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   claim the prize) — the Build can still be edited before judging.
 - **Payer-as-arbiter, now optional.** Disputes are resolved by the payer
   when no arbiter is set — the demo default. Since round 4 (Oct 27,
-  2026), `createJob` takes an optional third-party arbiter address: when
-  one is set, only the arbiter resolves disputes (it may be neither the
-  payer nor the agent), and the payer cannot resolve. If the arbiter goes
-  silent, the dispute still times out to the agent, so no arbiter can
-  lock funds forever.
+  2026), `createJob` takes an optional arbiter address: when one is set,
+  only the arbiter resolves disputes (it must be neither the payer nor
+  the agent), and the payer cannot resolve. If the arbiter goes silent,
+  the dispute still times out to the agent, so no arbiter can lock funds
+  forever. **Caveat (round 6): "third party" is not guaranteed** — the
+  check only compares addresses, so the payer could name a second wallet
+  they control. The agent should read the job's arbiter before accepting
+  and only take jobs whose arbiter it trusts; making the agent confirm
+  the arbiter is a v2 feature.
 - **Review window (fixed Oct 27, 2026 after independent review).** Three
   reviewers (Claude, Grok, ChatGPT) all found the same gap: `reviewWindow`
   was stored but never enforced, so a silent payer could lock funds forever
@@ -176,19 +186,26 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   would look like 1970 timestamps that have already passed. Funding
   stores what actually arrived (balance before/after, so fee-on-transfer
   tokens cannot make the escrow insolvent), token moves use SafeERC20-style
-  calls (USDT-style no-bool tokens work) whose returndata is inspected
-  with a bounded copy — a token returning 32 bytes holding a non-bool
-  value, a wrong-length return, or huge returndata can never revert the
-  payout or run it out of gas on the copy; the payout is treated as
-  failed and credited instead. A failing payout leg credits a pull
+  calls (USDT-style no-bool tokens work) made in assembly with a 32-byte
+  output buffer, and the returndata is inspected with a bounded copy — a
+  token returning 32 bytes holding a non-bool value, a wrong-length
+  return, or huge returndata can never revert the payout or run it out
+  of gas on the copy; the payout is treated as failed and credited
+  instead. (Round 6: the bounded copy alone was NOT enough — the
+  high-level `token.call(...)` copied the full returndata first, so a
+  token returning ~3MB ran the settlement out of gas, proven by the
+  return-bomb test: pre-fix, release consumed all 30M gas and reverted.
+  The assembly call caps the copy at 32 bytes; post-fix the same release
+  costs 17,519,061 gas — the token's own cost to return 3MB — and the
+  payout credits.) A failing payout leg credits a pull
   balance instead of stranding the job, and `MockUSDC` mint is
   owner-gated. The agent may never be the zero address (its own guard,
-  symmetric with the token check). 47 tests cover every new path,
+  symmetric with the token check). 48 tests cover every new path,
   including the previously untested ones (release while Disputed, both
   resolve directions, early timeout, cancel, window of 0, reentrancy
   through a hook token, cross-function reentrancy through a hook calling
   raiseDispute or acceptJob, and malformed-return tokens in all three
-  shapes).
+  shapes plus the 3,000,000-byte return bomb).
   Full verbatim findings: `reviews-2026-10-27.md`. Note: the
   contracts deployed on HSK testnet (above) are the PRE-fix version —
   redeploy is needed before demo selection for the on-chain code to match

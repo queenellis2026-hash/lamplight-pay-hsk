@@ -731,6 +731,40 @@ def test_malformed_return_payout_credits_instead_of_stranding(env, mode):
     assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 0
 
 
+def test_return_bomb_three_mb_credits_instead_of_running_out_of_gas(env):
+    """Claude Low (round 6): the round-5 bounded-returndata fix was
+    incomplete — solc's high-level token.call(...) copied the FULL
+    returndata into memory before the bounded inspection ran, so a token
+    returning ~3MB ran release() out of gas. Proven before the fix: with
+    the round-5 code, release on bomb mode 4 consumed all 30M gas and
+    reverted, the job stuck Delivered with no credit. The call is now
+    made in assembly with a 32-byte output buffer, so the escrow copies
+    at most 32 bytes; the token's own ~17.5M gas to return 3MB is
+    unavoidable, but the escrow pays nothing on top (post-fix release:
+    17,519,061 gas, job Released, payout credited). This test sends
+    release() with 20M gas — enough for the token to return (17.5M) but
+    far below the ~35M the old code needed — and asserts the settlement
+    succeeds and credits the payout instead of reverting."""
+    escrow, bad = env["escrow"], env["malformed"]
+    payer, agent = env["payer"], env["agent"]
+    bad.functions.setMode(3).transact({"from": payer})  # well-behaved for funding
+    before = bad.functions.balanceOf(agent).call()
+    jid = _make_delivered(env, amount=10 * ONE, window=600, token=bad.address)
+    bad.functions.setMode(4).transact({"from": payer})
+    tx = escrow.functions.release(jid).transact({"from": payer, "gas": 20_000_000})
+    rc = env["w3"].eth.wait_for_transaction_receipt(tx)
+    assert rc["status"] == 1  # succeeds inside 20M gas; the old code OOG'd at 30M
+    assert _state(env, jid) == 4  # State.Released — not stranded
+    assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 10 * ONE
+    # the bomb transfer moved no funds, so the agent's balance is unchanged
+    assert bad.functions.balanceOf(agent).call() == before
+    # once the token behaves again, the credit pays out in full
+    bad.functions.setMode(3).transact({"from": payer})
+    escrow.functions.withdraw(bad.address).transact({"from": agent})
+    assert bad.functions.balanceOf(agent).call() == before + 10 * ONE
+    assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 0
+
+
 def _hook_calldata(env, fn_name, jid):
     """Calldata for a HookToken hook that calls `fn_name(jid)` on the
     escrow from the token's address (so it fails access control)."""

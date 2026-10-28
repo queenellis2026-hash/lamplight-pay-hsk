@@ -11,6 +11,11 @@ pragma solidity ^0.8.24;
 ///     1 = transfer() returns exactly 1 byte
 ///     2 = transfer() returns 10,000 bytes of returndata
 ///     3 = well-behaved: transfer() moves funds and returns true
+///     4 = transfer() returns ~3,000,000 bytes of returndata (round-6
+///       return-bomb: tests whether the escrow's high-level token.call
+///       copies the full returndata into memory before the bounded
+///       inspection caps it — if so, a megabyte-scale return runs the
+///       settlement out of gas instead of crediting it)
 ///   In the malformed modes the transfer moves NO funds: the token refused
 ///   the payout but answered with garbage instead of false, so the escrow
 ///   credits the pull balance and the job still reaches its terminal
@@ -45,7 +50,7 @@ contract MalformedReturnToken {
 
     function setMode(uint256 mode_) external {
         require(msg.sender == owner, "not owner");
-        require(mode_ <= 3, "bad mode");
+        require(mode_ <= 4, "bad mode");
         mode = mode_;
     }
 
@@ -71,9 +76,19 @@ contract MalformedReturnToken {
                 mstore8(0, 0x01)
                 return(0, 1)
             }
-        } else {
+        } else if (mode == 2) {
             assembly {
                 return(0, 10000)
+            }
+        } else if (mode == 4) {
+            // Return-bomb: ~3,000,000 bytes. The token's own frame pays
+            // the memory-expansion cost of returning it (~17.5M gas), so
+            // a caller must supply enough gas for the token to return at
+            // all; the question the bomb answers is what the ESCROW pays
+            // on top of that — a full copy costs another ~17.5M, a
+            // 32-byte-capped copy costs almost nothing.
+            assembly {
+                return(0, 3000000)
             }
         }
     }

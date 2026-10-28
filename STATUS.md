@@ -260,3 +260,49 @@ nice-to-have, not needed for the demo).
   (now five fix rounds behind source) — redeploy + Build edit are
   separate steps. No GitHub push and no Build edit were made in
   this task.
+
+## Round 6 — Claude round-5 findings — DONE Oct 27, 2026 (evening)
+- **Return-bomb hypothesis TESTED FIRST — CONFIRMED (Claude Low 1):**
+  Claude claimed the round-5 bounded-returndata fix was probably
+  incomplete because solc's high-level `token.call(...)` copies the
+  full returndata into memory before the later assembly copy caps it
+  at 32 bytes. Tested, not assumed: a new MalformedReturnToken mode 4
+  returns ~3,000,000 bytes, and release() was called on it with a
+  30M-gas limit. Pre-fix result: receipt status 0, all 30,000,000 gas
+  consumed, job stuck Delivered, no credit — the escrow copied the
+  full 3MB on top of the token's own ~17.5M-gas return cost (~35M
+  total). Hypothesis CONFIRMED.
+- **Fix (exactly as Claude suggested):** `_tryTransfer` and
+  `_safeTransferFrom` now make the call in assembly with a 32-byte
+  output buffer — `call(gas(), token, 0, add(data, 0x20), mload(data),
+  0, 0x20)` — then check returndatasize() via `_lastCallReturnedTrue()`.
+  The call can copy at most 32 bytes; returndatasize() still reports
+  the full size, so the 3MB return is rejected without copying.
+  Post-fix, the same release costs 17,519,061 gas (the token's own
+  cost to return 3MB — unavoidable), job Released, payout credited
+  10,000,000.
+- **New test (stays in the suite either way):**
+  `test_return_bomb_three_mb_credits_instead_of_running_out_of_gas`
+  sends release() with a 20,000,000-gas limit — enough for the token
+  to return (17.5M) but far below the ~35M the old code needed — and
+  asserts the settlement succeeds (status 1), the job reaches
+  Released, the payout is credited, and the credit pays out once the
+  token behaves again. MalformedReturnToken mode 4 is documented in
+  the token's NatSpec (setMode now allows 0–4).
+- **Arbiter doc reworded (Claude Low 2):** "must be a third party"
+  overstated the guarantee — the check only compares addresses, so a
+  payer can set the arbiter to a second wallet they control. Reworded
+  in the contract NatSpec (header, Job field, createJob, resolveDispute),
+  README, and here: the agent should read the job's arbiter before
+  accepting and only take jobs whose arbiter it trusts. The
+  agent-confirmed arbiter feature is v2, NOT built here (out of scope).
+- **Tests: 48 passed, 0 failed** (47 before + 1 new bomb test). Demo
+  re-run: 3/3 scenarios + stranger guard pass, final balances unchanged
+  (payer 9920 / agent 80 / escrow 0) — the v3 video is NOT stale (the
+  demo never uses the malformed token). Contract bytecode 19,746 B
+  (was 20,001 B after round 5 — the assembly call is smaller than the
+  high-level call's return handling).
+- NOT done here: the testnet deployment is still the PRE-fix contract
+  (now six fix rounds behind source) — redeploy + Build edit are
+  separate steps. No GitHub push and no Build edit were made in
+  this task.

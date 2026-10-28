@@ -8,10 +8,15 @@ pragma solidity ^0.8.24;
 /// and the payer releases. If the agent never delivers by the deadline the
 /// payer can reclaim. Either side can raise a dispute; whoever the job
 /// names as arbiter resolves it — the payer by default, or an optional
-/// third-party arbiter set at creation (the arbiter may be neither the
-/// payer nor the agent). If the arbiter is set and goes silent, the dispute
-/// still times out to the agent via settleDisputeTimeout(), so no arbiter
-/// can lock funds forever either.
+/// arbiter address set at creation. The arbiter must be neither the payer
+/// nor the agent — but that check only compares addresses: it cannot
+/// prove the arbiter is an independent party, since the payer could set
+/// a second wallet they control. The agent should read the job's arbiter
+/// before accepting and only take jobs whose arbiter it trusts; making
+/// the agent confirm the arbiter is a v2 feature, not in this contract.
+/// If the arbiter is set and goes silent, the dispute still times out to
+/// the agent via settleDisputeTimeout(), so no arbiter can lock funds
+/// forever either.
 /// @dev Review-window lifecycle (REVISED Oct 27, 2026 after independent
 /// review by Claude, Grok and ChatGPT — see reviews-2026-10-27.md):
 ///   - submitDelivery records deliveredAt. The payer may release at any
@@ -65,7 +70,9 @@ contract AgentEscrow {
         bytes32 deliveryHash;
         string metadataURI; // off-chain job spec / quote id
         uint256 deliveredAt; // timestamp of submitDelivery; 0 until delivered
-        address arbiter; // optional third-party dispute resolver; address(0) = the payer
+        address arbiter; // optional dispute resolver; address(0) = the payer.
+        // "Third party" is NOT guaranteed: the check only excludes the
+        // payer's and agent's own addresses (see createJob).
     }
 
     /// @dev Dispute period after the review window ends: the payer must
@@ -127,9 +134,13 @@ contract AgentEscrow {
     ///   uncapped window would let the payer delay (or, near 2**256 - 1,
     ///   overflow) the agent's claim indefinitely.
     /// @dev `arbiter` is optional: address(0) means the payer resolves
-    ///   disputes, as before. A set arbiter must be a third party — neither
-    ///   the payer nor the agent — and then only the arbiter may resolve.
-    /// @param arbiter Optional third-party dispute resolver (address(0) = payer).
+    ///   disputes, as before. A set arbiter must be neither the payer nor
+    ///   the agent — but that is only an address comparison, not a proof
+    ///   of independence: the payer could name a second wallet they
+    ///   control. The agent should read the job's arbiter before
+    ///   accepting and only take jobs whose arbiter it trusts. Only the
+    ///   arbiter may resolve when one is set.
+    /// @param arbiter Optional dispute resolver (address(0) = payer).
     function createJob(
         address agent,
         address token,
@@ -266,10 +277,12 @@ contract AgentEscrow {
 
     /// @notice The job's arbiter resolves a dispute: true = pay the agent,
     ///   false = refund. Who the arbiter is depends on the job: the optional
-    ///   third-party arbiter set at creation, or the payer when none was
-    ///   set (the demo default — the payer-as-arbiter limitation, kept for
-    ///   no-arbiter jobs). The arbiter resolves; it cannot raise a dispute
-    ///   (only the parties may) and cannot release (only payer/agent may).
+    ///   arbiter address set at creation, or the payer when none was set
+    ///   (the demo default — the payer-as-arbiter limitation, kept for
+    ///   no-arbiter jobs). A set arbiter is not guaranteed independent (see
+    ///   createJob): the agent should have checked it before accepting.
+    ///   The arbiter resolves; it cannot raise a dispute (only the parties
+    ///   may) and cannot release (only payer/agent may).
     /// @dev Must be called within the dispute period (review window +
     ///   DISPUTE_PERIOD after delivery); after that, settleDisputeTimeout()
     ///   is the only exit, so a dispute cannot lock funds forever — even
@@ -346,15 +359,22 @@ contract AgentEscrow {
     ///   (USDT-style tokens) and returns false instead of reverting on a
     ///   false return or a failed call, so the caller can decide how to
     ///   handle the failure (credit a pull balance, or revert).
-    /// @dev The returndata is inspected with a bounded copy (see
-    ///   _lastCallReturnedTrue): a token returning 32 bytes holding a
-    ///   value other than 1, a wrong-length return, or a huge returndata
-    ///   can never revert this call or run it out of gas on the copy —
-    ///   the transfer is treated as failed and the payout is credited.
+    /// @dev ROUND 6 (Oct 27, 2026): the call is made in assembly with a
+    ///   32-byte output buffer (out offset 0, size 0x20). The high-level
+    ///   `token.call(...)` used before copied the FULL returndata into
+    ///   memory first, so a token returning ~3MB ran the settlement out
+    ///   of gas before the bounded inspection ever ran — proven by the
+    ///   mode-4 return-bomb test (release consumed all 30M gas and
+    ///   reverted, job stuck Delivered, no credit). With the capped
+    ///   output buffer the call copies at most 32 bytes; returndatasize()
+    ///   still reports the full size, and _lastCallReturnedTrue() rejects
+    ///   anything that is not empty or exactly 32 bytes holding 1.
     function _tryTransfer(address token, address to, uint256 amount) internal returns (bool) {
-        (bool success, ) = token.call(
-            abi.encodeWithSelector(IERC20.transfer.selector, to, amount)
-        );
+        bytes memory data = abi.encodeWithSelector(IERC20.transfer.selector, to, amount);
+        bool success;
+        assembly {
+            success := call(gas(), token, 0, add(data, 0x20), mload(data), 0, 0x20)
+        }
         if (!success) return false;
         return _lastCallReturnedTrue();
     }
@@ -363,10 +383,13 @@ contract AgentEscrow {
     ///   empty = USDT-style success (no return value); exactly 32 bytes
     ///   holding 1 = true; anything else — 0 (false), a non-bool value
     ///   such as 2, a wrong length — = failure. Copies at most 32 bytes,
-    ///   so a token returning megabytes of returndata cannot run the
-    ///   caller out of gas on the copy. Called immediately after the
-    ///   external call, with no other external call in between, so the
-    ///   returndata buffer still holds that call's return.
+    ///   and the callers (_tryTransfer, _safeTransferFrom) cap the
+    ///   call's output buffer at 32 bytes in assembly, so a token
+    ///   returning megabytes of returndata cannot run the caller out of
+    ///   gas on the copy — the returndatasize() check rejects it without
+    ///   copying. Called immediately after the external call, with no
+    ///   other external call in between, so the returndata buffer still
+    ///   holds that call's return.
     function _lastCallReturnedTrue() internal view returns (bool) {
         uint256 size;
         assembly { size := returndatasize() }
@@ -395,13 +418,18 @@ contract AgentEscrow {
 
     /// @dev SafeERC20-style transferFrom: accepts an empty return value
     ///   (USDT-style tokens) and reverts on a false return or a failed call.
-    ///   Uses the same bounded returndata inspection as _tryTransfer, so a
-    ///   malformed return can never revert the funding call itself — it
-    ///   fails cleanly with "funding failed" instead.
+    ///   Uses the same assembly call with a 32-byte output buffer as
+    ///   _tryTransfer (see its note): a malformed return can never run
+    ///   the funding call out of gas on the copy — it fails cleanly with
+    ///   "funding failed" instead.
     function _safeTransferFrom(address token, address from, uint256 amount) internal {
-        (bool success, ) = token.call(
-            abi.encodeWithSelector(IERC20.transferFrom.selector, from, address(this), amount)
+        bytes memory data = abi.encodeWithSelector(
+            IERC20.transferFrom.selector, from, address(this), amount
         );
+        bool success;
+        assembly {
+            success := call(gas(), token, 0, add(data, 0x20), mload(data), 0, 0x20)
+        }
         require(success && _lastCallReturnedTrue(), "funding failed");
     }
 
