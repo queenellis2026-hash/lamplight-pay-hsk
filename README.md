@@ -202,10 +202,13 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   cold path and asserts ceilings of 150,000 gas for the small-return
   paths and 19,000,000 for the bomb, so a future solc change cannot
   silently regress the assembly call; the bomb test itself also asserts
-  gasUsed ≤ 19,000,000.) A failing payout leg credits a pull
+  gasUsed ≤ 19,000,000.) A `pendingCredit(token, account)` view (round 8)
+  gives front-ends the pull balance directly, and the gas ceilings are
+  now documented in the contract's NatSpec as a tripwire for future solc
+  upgrades. A failing payout leg credits a pull
   balance instead of stranding the job, and `MockUSDC` mint is
   owner-gated. The agent may never be the zero address (its own guard,
-  symmetric with the token check). 49 tests cover every new path,
+  symmetric with the token check). 50 tests cover every new path,
   including the previously untested ones (release while Disputed, both
   resolve directions, early timeout, cancel, window of 0, reentrancy
   through a hook token, cross-function reentrancy through a hook calling

@@ -336,3 +336,33 @@ nice-to-have, not needed for the demo).
   demo never uses the malformed token). The HSK contract itself did NOT
   change in this round (tests only), so no build artifacts were
   recompiled and no redeploy is newly owed beyond the existing one.
+
+## Round-8 fix (Oct 27, 2026)
+
+- **pendingCredit view (Grok improvement 2):** new view
+  `pendingCredit(address token, address account)` returns the account's
+  pull balance from `pendingWithdrawals` — the mapping was already
+  public, but it was NOT documented anywhere as the front-end path, so
+  the named, documented view was added (the escape hatch in the brief
+  did not apply). New test
+  `test_pending_credit_view_reports_pull_balance`: 0 for the agent,
+  a stranger, and an uncredited token before the job; exactly
+  10 * ONE after a credited mode-0 release (job Released, not
+  stranded); 0 for the stranger and the other token after the credit;
+  agrees with the public mapping; back to 0 after `withdraw()`.
+- **Gas ceilings in the NatSpec (Grok improvement 3):** the
+  `_tryTransfer` NatSpec now states the exact ceilings the tests pin —
+  150,000 gas for the small-return paths (clean payer release 75,800,
+  clean agent-claim 77,613, credited mode 0 73,015, credited mode 2
+  74,075), 19,000,000 for the ~3MB return-bomb path (17,519,073, of
+  which ~17.5M is the token's own cost to return 3MB; the escrow pays
+  nothing on top), and the <3x relative bound — and why: so a future
+  solc upgrade that shifts the numbers gets noticed immediately.
+  NatSpec only; no behaviour changed.
+- **Tests: 50 passed, 0 failed** (49 before + 1 new view test). Demo
+  re-run: 3/3 scenarios + stranger guard pass, final balances unchanged
+  (payer 9920 / agent 80 / escrow 0) — the v3 video is NOT stale (the
+  demo never uses the malformed token or the new view). Build artifacts
+  recompiled (`scripts/compile.py`); AgentEscrow bytecode 19,934 B
+  (was 19,746 B after round 6 — the view adds 188 B). No GitHub push
+  and no Build edit were made in this task.

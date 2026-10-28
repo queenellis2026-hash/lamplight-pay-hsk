@@ -369,6 +369,20 @@ contract AgentEscrow {
     ///   output buffer the call copies at most 32 bytes; returndatasize()
     ///   still reports the full size, and _lastCallReturnedTrue() rejects
     ///   anything that is not empty or exactly 32 bytes holding 1.
+    /// @dev Gas ceilings pinned by tests
+    ///   (test_release_gas_clean_vs_credited_pins_bomb_fix, measured on
+    ///   eth-tester/PyEVM, Oct 27, 2026): 150,000 gas for the
+    ///   small-return paths — clean payer release 75,800, clean
+    ///   agent-claim release 77,613, credited mode 0 73,015, credited
+    ///   mode 2 (10KB return) 74,075 — and 19,000,000 gas for the ~3MB
+    ///   return-bomb path (17,519,073, of which ~17.5M is the token's own
+    ///   cost to return 3MB; the escrow pays nothing on top), plus a <3x
+    ///   relative bound (each credited release costs less than 3x the
+    ///   clean release). The ceilings are bounds, not exact figures: a
+    ///   future solc upgrade may shift gas a little, but anything near
+    ///   the ~35M the old copy-everything behaviour needed means the bomb
+    ///   fix regressed — and these numbers in the NatSpec are the
+    ///   tripwire that says so.
     function _tryTransfer(address token, address to, uint256 amount) internal returns (bool) {
         bytes memory data = abi.encodeWithSelector(IERC20.transfer.selector, to, amount);
         bool success;
@@ -449,6 +463,19 @@ contract AgentEscrow {
         if (job.deliveredAt == 0) return (0, 0);
         agentClaimAt = job.deliveredAt + job.reviewWindow;
         disputeTimeoutAt = agentClaimAt + DISPUTE_PERIOD;
+    }
+
+    /// @notice The pull balance an account can withdraw for a token, so
+    ///   front-ends never have to re-derive credits from event logs.
+    /// @dev Grok improvement 2 (round 8): a named, documented view over
+    ///   pendingWithdrawals. The mapping itself is public, but this is
+    ///   the front-end path — one call, one answer, no log scanning.
+    /// @param token The token the credit is held in.
+    /// @param account The account the credit belongs to.
+    /// @return credit The amount the account can pull with withdraw() /
+    ///   withdrawTo(), or 0 if there is no credit.
+    function pendingCredit(address token, address account) external view returns (uint256 credit) {
+        return pendingWithdrawals[token][account];
     }
 
     function getJob(uint256 jobId) external view returns (Job memory) {

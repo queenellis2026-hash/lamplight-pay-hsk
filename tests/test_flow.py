@@ -815,6 +815,35 @@ def test_malformed_return_payout_credits_instead_of_stranding(env, mode):
     assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 0
 
 
+def test_pending_credit_view_reports_pull_balance(env):
+    """Grok improvement 2 (round 8): pendingCredit(token, account) is
+    the named front-end view over the public pendingWithdrawals mapping.
+    A credited payout shows the exact amount; an account or token with
+    no credit reads 0; withdrawing drains it back to 0."""
+    escrow, bad = env["escrow"], env["malformed"]
+    payer, agent = env["payer"], env["agent"]
+    stranger = env["w3"].eth.accounts[2]
+    bad.functions.setMode(3).transact({"from": payer})  # well-behaved for funding
+    # no credit anywhere before the job
+    assert escrow.functions.pendingCredit(bad.address, agent).call() == 0
+    assert escrow.functions.pendingCredit(bad.address, stranger).call() == 0
+    assert escrow.functions.pendingCredit(env["musdc"].address, agent).call() == 0
+    jid = _make_delivered(env, amount=10 * ONE, window=600, token=bad.address)
+    bad.functions.setMode(0).transact({"from": payer})  # 32 bytes holding 2
+    escrow.functions.release(jid).transact({"from": payer})
+    assert _state(env, jid) == 4  # State.Released — credited, not stranded
+    assert escrow.functions.pendingCredit(bad.address, agent).call() == 10 * ONE
+    assert escrow.functions.pendingCredit(bad.address, stranger).call() == 0
+    assert escrow.functions.pendingCredit(env["musdc"].address, agent).call() == 0
+    # the view agrees with the public mapping
+    assert escrow.functions.pendingCredit(bad.address, agent).call() == \
+        escrow.functions.pendingWithdrawals(bad.address, agent).call()
+    # withdrawing drains the view back to 0
+    bad.functions.setMode(3).transact({"from": payer})
+    escrow.functions.withdraw(bad.address).transact({"from": agent})
+    assert escrow.functions.pendingCredit(bad.address, agent).call() == 0
+
+
 def test_return_bomb_three_mb_credits_instead_of_running_out_of_gas(env):
     """Claude Low (round 6): the round-5 bounded-returndata fix was
     incomplete — solc's high-level token.call(...) copied the FULL
