@@ -240,7 +240,7 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   jobs; acceptJob 53,521 under 110,000; return-bomb 19,000,000;
   gas-burning path 19,900,000).
 - **Tests: 85**, covering every path above (see Repo layout). Full round
-  history: `STATUS.md` and `reviews-2026-10-27.md`.
+  history: `STATUS.md`.
 - **Eligibility verified:** the hackathon is **online and global**. The
   organiser's Eventbrite listing says "Online event", "An online hackathon in
   India", and "inviting global developers". "Mumbai Edition" is branding, not a

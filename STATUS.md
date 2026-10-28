@@ -22,8 +22,7 @@ Settlement.
 
 ## Post-review fix (Oct 27, 2026)
 
-Independent review (Claude, Grok, ChatGPT — full verbatim in
-`reviews-2026-10-27.md`) found 9 findings, all fixed in source + tests:
+Independent review (Claude, Grok, ChatGPT) found 9 findings, all fixed in source + tests:
 - Dead `reviewWindow` (Claude High, Grok 2 Medium + Low, ChatGPT Medium):
   `deliveredAt` recorded at delivery; payer arbitrates during the window;
   agent may `release()` after it; disputes only inside it; disputed jobs
@@ -833,7 +832,7 @@ source change).
   AgentEscrow 0xF1c84737AAc850546d84C54d60B3b18fF82F8afA
     (tx 2ab7754a91670e4f21deef9280f6d3353803b7aee639f9114b78cb821ef94b12) —
     https://testnet-explorer.hskchain.net/address/0xF1c84737AAc850546d84C54d60B3b18fF82F8afA
-  Deployment record: build/hsk-testnet-deployment.json.
+  Deployment record: build/hsk-testnet-deployment.json (held locally, not in this repo).
 - Two real failures on the way, both diagnosed, both recorded here:
   (1) deploy_hsk_testnet.py fetches the nonce fresh via
   w3.eth.get_transaction_count for each contract, but the public RPC
@@ -895,7 +894,7 @@ source change).
   the owner says go.
 
 ## Demo video v4 — built Oct 28, 2026 ~1:20 AM CDT (round 16, new testnet addresses)
-- Rendered by scripts/make_demo_video_v4.py (copy of the v3 script; v3 untouched).
+- Rendered with a v4 render script derived from scripts/make_demo_video_v3.py (v3 untouched).
   Frames from a FRESH scripts/demo.py run Oct 28, 2026 — round-16 guard block:
   jobs 3 and 4, stranger release AND stranger refund both revert 'not payer',
   jobs settled back to payer. Final balances payer=9920.0 agent=80.0 escrow=0.0.
