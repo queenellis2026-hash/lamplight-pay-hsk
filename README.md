@@ -133,7 +133,7 @@ demo-receipts/          quote + receipts produced by the demo run
 python3 -m venv .venv && .venv/bin/pip install web3 eth-tester py-solc-x py-evm pytest
 .venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 21,919 B
 .venv/bin/python scripts/demo.py      # 3 scenarios, all pass
-.venv/bin/python -m pytest tests/ -v  # 71 passed
+.venv/bin/python -m pytest tests/ -v  # 77 passed
 ```
 
 Demo result (local EVM, real tx hashes in `demo-receipts/`):
@@ -231,7 +231,7 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   upgrades (invariant view 387,382 gas under an 800,000 ceiling at 50
   jobs; acceptJob 53,521 under 110,000; return-bomb 19,000,000;
   gas-burning path 19,900,000).
-- **Tests: 71**, covering every path above (see Repo layout). Full round
+- **Tests: 77**, covering every path above (see Repo layout). Full round
   history: `STATUS.md` and `reviews-2026-10-27.md`.
 - **Eligibility verified:** the hackathon is **online and global**. The
   organiser's Eventbrite listing says "Online event", "An online hackathon in

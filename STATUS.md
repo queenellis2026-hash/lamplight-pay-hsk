@@ -1,4 +1,4 @@
-# Lamplight Pay — status (Oct 27, 2026)
+# Lamplight Pay — status (Oct 28, 2026)
 
 ## Project
 
@@ -12,13 +12,13 @@ Settlement.
 - Submission deadline Nov 1, 2026, 21:30 IST · Demo Day Nov 4 · Winners Nov 5.
 
 ## Deployment (HSKChain Testnet, chain ID 133)
-
-- [AgentEscrow `0x6Fa3d30F854aCBd589E10D78e9531fB910759eb7`](https://testnet-explorer.hskchain.net/address/0x6Fa3d30F854aCBd589E10D78e9531fB910759eb7) — deployed Oct 26, 2026 ([tx](https://testnet-explorer.hskchain.net/tx/59069c0957ea521c47bbc79fc22d9f3de4df8916c611b4b8c4a41e28f4a74f7c)).
-- [MockUSDC `0x860CadF955CF73FDB8E9ED2979104baae9f833B9`](https://testnet-explorer.hskchain.net/address/0x860CadF955CF73FDB8E9ED2979104baae9f833B9) — deployed Oct 26, 2026 ([tx](https://testnet-explorer.hskchain.net/tx/2ea7242b072fd7348b619f279e66a9c531792a4e99b8d835a8a073989191b4a7)).
-- Deployer: `0xa67d284fC85345c2e3aCC3A34d46f93a295df341` (testnet-only, funded 0.1 tHSK from the testnet faucet).
-- Demo scenarios: 3/3 pass on a local EVM; `pytest` 16 passed. Receipts in `demo-receipts/`.
-- Demo video: 28s, Unlisted — https://youtu.be/GdHNK0fZ0Lo.
-- Submitted Oct 27, 2026: https://dorahacks.io/build/50417 — status Under Review. The Build can still be edited before judging.
+- [AgentEscrow `0xF1c84737AAc850546d84C54d60B3b18fF82F8afA`](https://testnet-explorer.hskchain.net/address/0xF1c84737AAc850546d84C54d60B3b18fF82F8afA) — deployed Oct 28, 2026 ~1:14 AM CDT ([tx](https://testnet-explorer.hskchain.net/tx/2ab7754a91670e4f21deef9280f6d3353803b7aee639f9114b78cb821ef94b12)), Blockscout-verified.
+- [MockUSDC `0x00835c4588461353B4B284437d7D65c466587375`](https://testnet-explorer.hskchain.net/address/0x00835c4588461353B4B284437d7D65c466587375) — deployed Oct 28, 2026 ~1:14 AM CDT ([tx](https://testnet-explorer.hskchain.net/tx/b0a3961840adfee33fe9352710ebac1e8e30c5467f8dc7c98c3696f8e95d913f)), Blockscout-verified.
+- Deployer: `0x995646c5270f26a8D64df58D7bc7e8277c606e27` (testnet-only, fresh key; funded 0.1 tHSK from the testnet faucet). Previous deployment (Oct 26, 2026): AgentEscrow `0x6Fa3d30F854aCBd589E10D78e9531fB910759eb7` ([tx](https://testnet-explorer.hskchain.net/tx/59069c0957ea521c47bbc79fc22d9f3de4df8916c611b4b8c4a41e28f4a74f7c)), MockUSDC `0x860CadF955CF73FDB8E9ED2979104baae9f833B9` ([tx](https://testnet-explorer.hskchain.net/tx/2ea7242b072fd7348b619f279e66a9c531792a4e99b8d835a8a073989191b4a7)), deployer `0xa67d284fC85345c2e3aCC3A34d46f93a295df341` — superseded by the Oct 28 redeploy.
+- Demo scenarios: 3/3 pass on a local EVM; `pytest` 71 passed. Receipts in `demo-receipts/`.
+- Demo video: v4, 2:05, Unlisted — https://youtu.be/6lGHXO1dEVM.
+- Submitted Oct 27, 2026: https://dorahacks.io/build/50417 — status Under Review. The Build can still be edited before judging. (Build edited Oct 28, 2026 with the new addresses + v4 video, verified live.)
+- Update (Oct 28, 2026): rounds 11–16 pushed Oct 28 ~01:09 AM CDT (head 6022bcb2); redeploy done Oct 28 ~1:14 AM CDT. The 'no push / PRE-fix deployment' notes in the round 11–15 sections below are superseded by that push.
 
 ## Post-review fix (Oct 27, 2026)
 
@@ -800,7 +800,7 @@ source change).
 - NOT done here: no push (round 16 pushes only after its own Grok
   re-review). The testnet deployment is still the PRE-fix contract
   (now sixteen fix rounds behind source) — redeploy + Build edit
-  are separate steps. Held, per instruction: on-chain quote binding
+  are separate steps. Update (Oct 28, 2026): superseded — rounds 11–16 pushed Oct 28 ~01:09 AM CDT (head 6022bcb2); redeploy done Oct 28 ~1:14 AM CDT (see 'Redeploy' below). Held, per instruction: on-chain quote binding
   (quoteHash in createJob + JobCreated event) — changes the contract
   days before the Nov 1 deadline for quote provenance the demo scope
   doesn't need; the receipt already carries the quote id. (Older
@@ -809,31 +809,105 @@ source change).
   batchWithdraw(token, accounts[]); totalUnsettled[token]; maxJobs /
   cursor pagination on settlementInvariant.)
 
-## Redeploy attempt — Oct 28, 2026 (night) — BLOCKED on faucet funding
+## Redeploy — Oct 28, 2026 (night) — DONE, both contracts live + verified
 - Goal: redeploy MockUSDC + AgentEscrow (round-16 code) to HSK testnet
   (chain 133) so the on-chain code matches the reviewed source; the
   deployed contracts (MockUSDC 0x860CadF955CF73FDB8E9ED2979104baae9f833B9,
   AgentEscrow 0x6Fa3d30F854aCBd589E10D78e9531fB910759eb7) are 16 rounds
   behind source. Testnet only — never mainnet (177).
-- Verified ready: RPC https://testnet.hsk.xyz reachable from the VM
-  (eth_chainId 0x85 = 133, gas price ~1 gwei, chain live at block
-  ~0x215e94f). Artifacts recompiled from round-16 source (AgentEscrow
-  21,919 B, matches the round-16 figure). Deploy script needs no code
-  changes — only its header comment was corrected (RPC no longer
-  times out).
-- Fresh deployer generated: 0x995646c5270f26a8D64df58D7bc7e8277c606e27.
-  Key at ~/.hsk-testnet-deployer (mode 0600, testnet-only). NEVER the
-  Ellis main wallet key. The OLD deployer
+- Faucet: 1 tHSK claimed for the fresh deployer in a browser
+  (2026-10-28 01:08:36, tx 0x527a8c49e34055041cfb4d5612348b7cd9db7e1345b8388a172667bbbc0403e8);
+  on-chain balance read 0.1 tHSK (faucet page said 1 tHSK — either way
+  far more than the ~0.004 tHSK the deploy needed).
+- Fresh deployer: 0x995646c5270f26a8D64df58D7bc7e8277c606e27. Key at
+  ~/.hsk-testnet-deployer (mode 0600, testnet-only). NEVER the Ellis
+  main wallet key. The OLD deployer
   (0xa67d284fC85345c2e3aCC3A34d46f93a295df341) still holds 0.0962 tHSK
-  but is NOT to be reused — the redeploy uses the fresh key only.
-  Expected deploy cost ~0.004 tHSK (the first deploy spent ~0.0038).
-- BLOCKER: the official faucet (https://faucet.hashkeychain.net/,
-  1 tHSK per 24h) requires a reCAPTCHA v2 solve in a browser — its
-  drip API takes {token, address} and the token can only come from
-  the captcha widget. The thirdweb faucet (0.01 tHSK/day) also needs
-  a browser wallet interaction. No API-only faucet route exists.
-  Next step: claim 1 tHSK for the fresh deployer address in a browser,
-  then run: DEPLOYER_KEY=$(cat ~/.hsk-testnet-deployer) .venv/bin/python
-  scripts/deploy_hsk_testnet.py — it writes
-  build/hsk-testnet-deployment.json and the new addresses go here.
-  Do NOT edit DoraHacks Build 50417 until the redeploy is done.
+  but was NOT reused.
+- NEW ADDRESSES (round 16, verified on Blockscout — "Pass - Verified"):
+  MockUSDC 0x00835c4588461353B4B284437d7D65c466587375
+    (tx b0a3961840adfee33fe9352710ebac1e8e30c5467f8dc7c98c3696f8e95d913f,
+    block 34990583) — https://testnet-explorer.hskchain.net/address/0x00835c4588461353B4B284437d7D65c466587375
+  AgentEscrow 0xF1c84737AAc850546d84C54d60B3b18fF82F8afA
+    (tx 2ab7754a91670e4f21deef9280f6d3353803b7aee639f9114b78cb821ef94b12) —
+    https://testnet-explorer.hskchain.net/address/0xF1c84737AAc850546d84C54d60B3b18fF82F8afA
+  Deployment record: build/hsk-testnet-deployment.json.
+- Two real failures on the way, both diagnosed, both recorded here:
+  (1) deploy_hsk_testnet.py fetches the nonce fresh via
+  w3.eth.get_transaction_count for each contract, but the public RPC
+  returns a STALE nonce for the second deploy in the same run — twice
+  the AgentEscrow tx reused the just-mined MockUSDC nonce and the node
+  rejected it as "replacement transaction underpriced". The script was
+  NOT fixed; AgentEscrow was deployed separately with an explicit
+  nonce verified via cast (one-off /tmp/deploy_agent_escrow.py).
+  An orphaned first MockUSDC (0x6CDdC8F35256A7973099b0772556619cebd6a71A,
+  tx 5dfa11ca1a5c8a83c1f2222183cd46c8c622e9ac48c1b876fbdc73857c8afe79)
+  was left on-chain, unused. (2) The script's 3,000,000 gas limit is
+  too low for AgentEscrow — the first explicit-nonce attempt consumed
+  all 3,000,000 gas and failed (status 0, tx
+  117e3ab2ed9431bfb3743f0290302d2bafc71b4b358858403ec1c0f7fdae26f1, dead
+  address 0xc266B0099fd6BA8812a0d85048Fc592C7B78bd8E). Measured estimate
+  is 4,800,180 gas; the successful deploy used 6,000,000. The deploy
+  script's gas limit needs raising before any future redeploy.
+  Total spent across all attempts: ~0.0096 tHSK; deployer balance now 0.0904442 tHSK (verified live on-chain Oct 28, 2026).
+- Verification: both contracts verified via forge verify-contract
+  (Blockscout verifier, solc 0.8.24, optimizer off). Direct urllib
+  POSTs to the Blockscout API were refused (403, then dropped
+  connections); forge's submission went through and both returned
+  "Pass - Verified".
+- DONE Oct 28, 2026: DoraHacks Build 50417 edited with the new addresses + v4 video, verified live. Do NOT touch the old deployed contracts.
+
+## Deploy-script fix — Oct 28, 2026 (night) — DONE, local only, no redeploy
+- Both Redeploy bugs fixed in scripts/deploy_hsk_testnet.py (no live
+  redeploy — the round-16 contracts are live and a redeploy needs an
+  explicit go-ahead; no push yet):
+  (1) NONCE: fetched ONCE via get_transaction_count(pending) and
+  incremented locally per tx — the script never re-queries, so a stale
+  RPC read can no longer reuse a nonce. (2) GAS: the hardcoded
+  3,000,000 cap is gone; each deploy's limit is eth_estimateGas + 25%
+  headroom, floored at 5,000,000 (deploy_gas_limit; a limit is a cap,
+  not a spend — unused gas is refunded). (3) Receipt status is now
+  checked — a status-0 deploy aborts loudly instead of being recorded
+  as live (the old script would have written the dead 3M-gas address
+  to the record). Dry-run mode: HSK_DRY_RUN=1 allows a local chain
+  (still refuses mainnet 177) and writes the record to
+  build/hsk-testnet-deployment-dryrun.json, never the real record.
+- Verification, no testnet funds spent: new tests/test_deploy_script.py
+  (6 tests) on eth-tester — gas rule table-driven (4,800,180 -> 6,000,225;
+  floor wins below 4M), old 3M cap proven below the real AgentEscrow
+  estimate, both contracts deploy in one run with sequential nonces
+  even when a second nonce query would return stale 0 (count proves
+  the query happens exactly once), status-0 receipt aborts. Full suite:
+  77 passed (71 + 6 new). End-to-end dry run through the script's
+  real main() against local Anvil (chain 31337): MockUSDC estimate
+  892,499 -> limit 5,000,000, nonce 0, 0x5FbDB2315678afecb367f032d93F642f64180aa3;
+  AgentEscrow estimate 4,761,225 -> limit 5,951,532, nonce 1,
+  0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512, receipt status 1.
+  Mainnet refusal verified: same script against Anvil chain 177 exits
+  REFUSED even in dry-run mode. Real deployment record untouched
+  (md5 a6403922ab515cfd067aad4204fb4860 before and after).
+- Gas rule for future redeploys: limit = max(ceil(estimate * 1.25),
+  5,000,000). On HSK testnet the AgentEscrow estimate was 4,800,180,
+  so a live run would set ~6,000,225 — the same figure the successful
+  round-16 deploy used. Script is safe for a future redeploy when
+  the owner says go.
+
+## Demo video v4 — built Oct 28, 2026 ~1:20 AM CDT (round 16, new testnet addresses)
+- Rendered by scripts/make_demo_video_v4.py (copy of the v3 script; v3 untouched).
+  Frames from a FRESH scripts/demo.py run Oct 28, 2026 — round-16 guard block:
+  jobs 3 and 4, stranger release AND stranger refund both revert 'not payer',
+  jobs settled back to payer. Final balances payer=9920.0 agent=80.0 escrow=0.0.
+  Job-0 funded tx is fresh (1c08ba29…378a24 — quote is fresh each run, so it
+  differs from v3); the invented "[A] quote:" line from v3 was dropped, the
+  real output prints no quote line. PAGE_B/C now show the real tx hashes.
+- Testnet frame shows the NEW live contracts only: AgentEscrow
+  0xF1c84737AAc850546d84C54d60B3b18fF82F8afA, MockUSDC
+  0x00835c4588461353B4B284437d7D65c466587375, Deployer
+  0x995646c5270f26a8D64df58D7bc7e8277c606e27, chain 133,
+  testnet-explorer.hskchain.net. Old addresses nowhere in the video.
+- Narration: v3 audio segments reused verbatim (build/demo-video-v4-audio/,
+  copied from the v3 set); no re-generation — demo_c narration is still true
+  for round 16. Duration 125.17s (2:05), 1280x720 h264 + AAC, md5
+  2bf0f0d29624ab40dbbb3c23d3c65fc1. Verified: plays end to end, audio present
+  in every section (mean -19 to -22 dB), guard + testnet frames viewed.
+- DONE Oct 28, 2026: uploaded to YouTube as Unlisted (@EllisLamplight) at https://youtu.be/6lGHXO1dEVM; Build 50417 edited. Do NOT make it Public.
