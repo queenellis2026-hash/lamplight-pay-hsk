@@ -1,0 +1,47 @@
+{
+  "chain_id": 133,
+  "network": "HSKChain Testnet",
+  "musdc": "0xEF346652eeB233662E7d290d222175895d53ef15",
+  "escrow": "0xAB70612F45d9cf914D129b0DB71DE243dD55813C",
+  "payer": "0x995646c5270f26a8D64df58D7bc7e8277c606e27",
+  "agent": "0xb9daf1aF80E73B1505471A77cE7e5E7Bd8233413",
+  "stranger": "0x06Ce3836Ff690a5b02E879ED6D1591A6c7d65d1D",
+  "start_job_id": 0,
+  "flows": {
+    "A": [
+      "867bc63c94159e973ae7e2b73f5ebbf38e3c1f0c0619ab123f52bb114d59a7d0",
+      "c03b69e25c63d261d7c2ca7ae335b833b28d91133453a0539544186989819fb1"
+    ],
+    "B": [
+      "987919d0bbf9f4729cc391ad983e7d5c87cdaa41f71dfc5ee9d538038e304d19",
+      "86f89de2ce09dd5bf899078330ebcf1a23b68ca23a4842b5b4d9f148ad251708"
+    ],
+    "C": [
+      "f90033e40a84f31d504f80cb03040f6c031eb9e23a587d78ce8f56b1c5d154d8",
+      "9da092e1319a06e86e751d52ffbfe4d6e7767ab3faf66594f878f3540ebbe9a4"
+    ],
+    "guard": [
+      "ee302a0aa427b7905935c93df0012f34ef7fc960f818e8e5d0a46e74f962a31a",
+      "5a334eff5896e4b849cf885013bca76f0b1951f72a54d987b9f89b209b9555c6",
+      "8c72cecd022ff56c32879fdc83c639d31acd40afca09f110519f83479b9b6ac1",
+      "26b4fd4d0217e7975ceea733a2dfcc1f306bdd4b09bbc678ce43d1933395df48",
+      "30bc3b3ef3770003a632d8b922b2936eecd559ec8c3703b16f57f422ee87b93f",
+      "b5a2eab61aa47002b542a0f19e8c21a0380ff23013040a088502554afc2870b3"
+    ]
+  },
+  "final_balances_musdc": {
+    "payer": 9920.0,
+    "agent": 80.0,
+    "escrow": 0.0
+  },
+  "settlement_invariant": {
+    "balance": 0,
+    "unsettled_sum": 0,
+    "pending_credits_sum": 0,
+    "holds": true
+  },
+  "deployer_thsk_spent": 0.016964619933013566,
+  "deployer_thsk_remaining": 0.035388128510149094,
+  "gas_price_wei": 1001000000,
+  "notes": ""
+}

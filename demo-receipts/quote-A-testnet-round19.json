@@ -1,0 +1,16 @@
+{
+  "chain_id": 133,
+  "escrow_contract": "0xAB70612F45d9cf914D129b0DB71DE243dD55813C",
+  "expires_at": 1793223902,
+  "issued_at": 1793220302,
+  "network": "HSKChain Testnet",
+  "nonce": "d3bc2dafc5ac48b2",
+  "pay_to": "0xb9daf1aF80E73B1505471A77cE7e5E7Bd8233413",
+  "price": 50000000,
+  "protocol": "lamplight-pay/1",
+  "quote_hash": "0x0e28a72eea54abf68a4c2d23d658dc14b510960ece81297e44478ee88691d9de",
+  "quote_id": "36eb93f8-33f6-4dd3-8e17-3928267d6f4e",
+  "service": "on-chain holder audit (top-20 wallets)",
+  "token": "0xEF346652eeB233662E7d290d222175895d53ef15",
+  "token_symbol": "mUSDC"
+}

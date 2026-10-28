@@ -56,17 +56,20 @@ GAS_CEILING_GAS_BURN = 19_900_000  # mode-5 gas-burning path, measured 19,697,41
 GAS_CEILING_COLD_PRIOR_CREDIT = 140_000
 # Round 13 adds the invariant-view ceiling: settlementInvariant is a
 # view, so off-chain callers read it via eth_call (no block gas limit
-# in practice) — but an on-chain caller pays the O(jobCount) scan, so
-# the view's gas is pinned as a regression tripwire for on-chain
+# in practice) — but an on-chain caller pays the view's gas, so the
+# view's gas is pinned as a regression tripwire for on-chain
 # callers, the same way the release ceilings catch bomb regressions.
-# Measured on this toolchain (eth-tester/PyEVM, Oct 28, 2026) on a
-# fresh escrow with exactly 50 unsettled jobs: 387,382 gas via
-# eth_estimateGas (which includes its 21,000 intrinsic base, so the
-# pure view cost is ~366,000; marginal cost ~7,000 gas per job).
-# Ceiling 800,000 is ~2x measured, the same headroom rule as
-# GAS_CEILING_SMALL. A future solc version or storage-layout change
-# that makes the scan materially more expensive fails the test.
-GAS_CEILING_INVARIANT_VIEW = 800_000
+# ROUND 17 (Oct 28, 2026): the view is O(1) now — the O(jobCount)
+# scan was replaced by the totalUnsettled accumulator (Grok
+# improvements 1 + 2, round-16 review). Measured on this toolchain
+# (eth-tester/PyEVM, Oct 28, 2026) on a fresh escrow: 36,069 gas at
+# 0 jobs, 36,070 at 50 jobs — a 1-gas delta, flat in jobCount, vs
+# 387,382 at 50 jobs under the old scan. Ceiling 80,000 is ~2x
+# measured, the same headroom rule as GAS_CEILING_SMALL. The test
+# also pins the flatness (50-job gas minus 0-job gas <= 1,000), so
+# a future change that reintroduces a per-job cost fails the test
+# even if it stays under the ceiling.
+GAS_CEILING_INVARIANT_VIEW = 80_000
 # Round 15 adds the acceptJob ceiling: a successful acceptJob with
 # an arbiter match is one cold SSTORE (state zero -> non-zero) plus
 # the onlyAgent/state/deadline/arbiter checks and the JobAccepted
@@ -702,6 +705,227 @@ def test_reentrancy_through_hook_token(env):
     assert hook.functions.balanceOf(agent).call() == agent_before + 10 * ONE
     assert escrow.functions.pendingWithdrawals(hook.address, agent).call() == 0
     assert hook.functions.balanceOf(escrow.address).call() == 0
+
+
+def _deploy_hook_after(env):
+    """ROUND 19: deploy a fresh HookAfterToken, funded + approved for
+    the escrow. Deployed per-test, not in the shared fixture, so arming
+    its hook cannot leak into other tests."""
+    w3, payer = env["w3"], env["payer"]
+    escrow = env["escrow"]
+    a = json.loads((ROOT / "build" / "HookAfterToken.json").read_text())
+    c = w3.eth.contract(abi=a["abi"], bytecode=a["bin"])
+    rc = w3.eth.wait_for_transaction_receipt(c.constructor().transact({"from": payer}))
+    token = w3.eth.contract(address=rc.contractAddress, abi=a["abi"])
+    token.functions.mint(payer, 10_000 * ONE).transact({"from": payer})
+    token.functions.approve(escrow.address, 10_000 * ONE).transact({"from": payer})
+    return token
+
+
+def _decode_invariant(ret):
+    """Decode a settlementInvariant() return into
+    (balance, unsettled, credits, holds). The ABI encoding is four
+    32-byte words; the bool is the last word."""
+    raw = bytes(ret)
+    assert len(raw) == 128, f"expected 128-byte invariant return, got {len(raw)}"
+    words = [int.from_bytes(raw[i:i + 32], "big") for i in range(0, 128, 32)]
+    return words[0], words[1], words[2], words[3] == 1
+
+
+def test_withdraw_hook_sees_true_invariant(env):
+    """ROUND 19 (ChatGPT round-18 finding 1): a recipient callback firing
+    mid-withdrawal must see settlementInvariant hold. The hook-after
+    token moves the balance first and calls back second, so against the
+    pre-fix ordering the recorded tuple would read (0, 0, 10 ONE,
+    False) — the credit total still un-subtracted — and the holds
+    assertion below would fail. Post-fix the credit total is subtracted
+    before the transfer, so the hook reads (0, 0, 0, True)."""
+    escrow = env["escrow"]
+    payer, agent = env["payer"], env["agent"]
+    token = _deploy_hook_after(env)
+    jid = _make_delivered(env, amount=10 * ONE, token=token.address)
+    # Step 1: make the payout leg fail so the agent holds a pull credit.
+    # The hook calls release(jid) mid-payout; the inner call reverts,
+    # the hook reverts, the transfer rolls back, and the escrow
+    # credits the full amount instead of stranding the job.
+    # ROUND 21: this step proves the OUTCOME, not the mechanism — the
+    # guard rejects first in the current code, but the test cannot
+    # distinguish guard-rejection from the state-check backstop (the
+    # inner call would revert on state even without the guard), and a
+    # failed hook reverts the whole transfer, so the inner revert
+    # reason is not observable through this token. Guard-rejection
+    # itself is pinned by test_reentrancy_through_hook_token, which
+    # records the returndata carrying "reentrant".
+    token.functions.setHook(escrow.address, escrow.encode_abi("release", args=[jid])).transact({"from": payer})
+    escrow.functions.release(jid).transact({"from": payer})
+    assert _state(env, jid) == 4  # State.Released
+    assert escrow.functions.pendingWithdrawals(token.address, agent).call() == 10 * ONE
+    assert token.functions.balanceOf(escrow.address).call() == 10 * ONE
+    # Step 2: re-arm the hook to read the invariant, then withdraw.
+    token.functions.setHook(escrow.address, escrow.encode_abi("settlementInvariant", args=[token.address])).transact({"from": payer})
+    agent_before = token.functions.balanceOf(agent).call()
+    escrow.functions.withdraw(token.address).transact({"from": agent})
+    balance, unsettled, credits, holds = _decode_invariant(token.functions.lastHookReturndata().call())
+    assert (balance, unsettled, credits) == (0, 0, 0)
+    assert holds is True
+    assert token.functions.balanceOf(agent).call() == agent_before + 10 * ONE
+    assert escrow.functions.pendingWithdrawals(token.address, agent).call() == 0
+
+
+def test_release_hook_sees_true_invariant(env):
+    """ROUND 19: the release payout leg already subtracts totalUnsettled
+    before the transfer, so a hook-after callback mid-release must see
+    the invariant hold. Pins the release window alongside the withdraw
+    window; this one holds pre- and post-fix, so it is a pin, not a
+    regression test."""
+    escrow = env["escrow"]
+    payer, agent = env["payer"], env["agent"]
+    token = _deploy_hook_after(env)
+    jid = _make_delivered(env, amount=10 * ONE, token=token.address)
+    token.functions.setHook(escrow.address, escrow.encode_abi("settlementInvariant", args=[token.address])).transact({"from": payer})
+    agent_before = token.functions.balanceOf(agent).call()
+    escrow.functions.release(jid).transact({"from": payer})
+    balance, unsettled, credits, holds = _decode_invariant(token.functions.lastHookReturndata().call())
+    assert (balance, unsettled, credits) == (0, 0, 0)
+    assert holds is True
+    assert token.functions.balanceOf(agent).call() == agent_before + 10 * ONE
+    assert _state(env, jid) == 4  # State.Released
+
+
+def test_create_job_hook_sees_documented_false_window(env):
+    """ROUND 19: the createJob window stays OPEN by design — during
+    transferFrom the balance has risen but totalUnsettled has not yet
+    been added, so a hook-after callback mid-funding reads holds ==
+    False. This pins the documented window (see the settlementInvariant
+    note): if a future round closes it, this test must change with it."""
+    escrow = env["escrow"]
+    payer, agent = env["payer"], env["agent"]
+    token = _deploy_hook_after(env)
+    token.functions.setHook(escrow.address, escrow.encode_abi("settlementInvariant", args=[token.address])).transact({"from": payer})
+    escrow.functions.createJob(agent, token.address, 10 * ONE, 3600, 600, "ipfs://t", ZERO).transact({"from": payer})
+    balance, unsettled, credits, holds = _decode_invariant(token.functions.lastHookReturndata().call())
+    assert (balance, unsettled, credits) == (10 * ONE, 0, 0)
+    assert holds is False
+    token.functions.setHook(ZERO, b"").transact({"from": payer})
+
+
+def test_withdraw_to_hook_sees_true_invariant(env):
+    """ROUND 21 (Chris delta improvement 1): mirror of the withdraw
+    hook test for withdrawTo(). Only withdraw() was exercised before,
+    but round 19 edited both functions — a recipient callback firing
+    mid-withdrawTo must also see settlementInvariant hold."""
+    escrow = env["escrow"]
+    payer, agent = env["payer"], env["agent"]
+    recipient = env["w3"].eth.accounts[2]
+    token = _deploy_hook_after(env)
+    jid = _make_delivered(env, amount=10 * ONE, token=token.address)
+    # Same failed-payout setup as the withdraw test: the agent ends up
+    # holding a 10 ONE pull credit.
+    token.functions.setHook(escrow.address, escrow.encode_abi("release", args=[jid])).transact({"from": payer})
+    escrow.functions.release(jid).transact({"from": payer})
+    assert _state(env, jid) == 4  # State.Released
+    assert escrow.functions.pendingWithdrawals(token.address, agent).call() == 10 * ONE
+    # Re-arm the hook to read the invariant, then withdraw to a
+    # different address.
+    token.functions.setHook(escrow.address, escrow.encode_abi("settlementInvariant", args=[token.address])).transact({"from": payer})
+    recipient_before = token.functions.balanceOf(recipient).call()
+    escrow.functions.withdrawTo(token.address, recipient).transact({"from": agent})
+    balance, unsettled, credits, holds = _decode_invariant(token.functions.lastHookReturndata().call())
+    assert (balance, unsettled, credits) == (0, 0, 0)
+    assert holds is True
+    assert token.functions.balanceOf(recipient).call() == recipient_before + 10 * ONE
+    assert escrow.functions.pendingWithdrawals(token.address, agent).call() == 0
+    assert token.functions.balanceOf(escrow.address).call() == 0
+
+
+def test_failed_withdrawal_leaves_totals_unchanged(env):
+    """ROUND 21 (Chris delta improvement 2): the atomicity test for
+    the round-19 reorder. A FAILED withdrawal must leave
+    pendingWithdrawals and totalPendingCredits exactly as they were
+    — the "revert restores everything" argument is the whole safety
+    case for subtracting before the transfer, and until now it was
+    argued, not tested. The withdrawal fails because the hook-after
+    token's callback reverts mid-transfer, rolling the whole
+    withdraw call back."""
+    escrow = env["escrow"]
+    payer, agent = env["payer"], env["agent"]
+    token = _deploy_hook_after(env)
+    jid = _make_delivered(env, amount=10 * ONE, token=token.address)
+    # Credit the agent via the same failed payout as the withdraw test.
+    token.functions.setHook(escrow.address, escrow.encode_abi("release", args=[jid])).transact({"from": payer})
+    escrow.functions.release(jid).transact({"from": payer})
+    assert escrow.functions.pendingWithdrawals(token.address, agent).call() == 10 * ONE
+    assert escrow.functions.totalPendingCredits(token.address).call() == 10 * ONE
+    # Arm a hook that cannot succeed: release() on a nonexistent job
+    # reverts, so the token's transfer reverts. _tryTransfer swallows
+    # the failed call and reports it via the balances (moved == 0),
+    # so withdraw's own require(moved == amount) reverts the whole
+    # call — two layers, same outcome: everything rolls back.
+    # Record both totals and the escrow balance first.
+    token.functions.setHook(escrow.address, escrow.encode_abi("release", args=[9999])).transact({"from": payer})
+    credit_before = escrow.functions.pendingWithdrawals(token.address, agent).call()
+    total_before = escrow.functions.totalPendingCredits(token.address).call()
+    escrow_before = token.functions.balanceOf(escrow.address).call()
+    agent_before = token.functions.balanceOf(agent).call()
+    with pytest.raises(TransactionFailed, match="withdrawal failed"):
+        escrow.functions.withdraw(token.address).transact({"from": agent})
+    assert escrow.functions.pendingWithdrawals(token.address, agent).call() == credit_before
+    assert escrow.functions.totalPendingCredits(token.address).call() == total_before
+    assert token.functions.balanceOf(escrow.address).call() == escrow_before
+    assert token.functions.balanceOf(agent).call() == agent_before
+
+
+def _deploy_partial_hook(env):
+    """ROUND 21: deploy a fresh PartialHookToken, funded + approved
+    for the escrow. Per-test, like _deploy_hook_after, so arming its
+    hook cannot leak into other tests."""
+    w3, payer = env["w3"], env["payer"]
+    escrow = env["escrow"]
+    a = json.loads((ROOT / "build" / "PartialHookToken.json").read_text())
+    c = w3.eth.contract(abi=a["abi"], bytecode=a["bin"])
+    rc = w3.eth.wait_for_transaction_receipt(c.constructor().transact({"from": payer}))
+    token = w3.eth.contract(address=rc.contractAddress, abi=a["abi"])
+    token.functions.mint(payer, 10_000 * ONE).transact({"from": payer})
+    token.functions.approve(escrow.address, 10_000 * ONE).transact({"from": payer})
+    return token
+
+
+def test_partial_payout_hook_sees_transient_false_then_settled_true(env):
+    """ROUND 21 (ChatGPT final improvement 2): the payout-window test
+    round 20 left open. A token that PARTIALLY transfers and then
+    calls back observes the transient window: during the payout the
+    unsettled sum is already subtracted but the pull credit is not
+    yet recorded, so the hook reads holds == False; after the call
+    the credit lands and the settled invariant holds == True. Both
+    observations are asserted — the transient one AND the settled
+    one. The shortfall is 1 base unit on a 10 ONE payout."""
+    escrow = env["escrow"]
+    payer, agent = env["payer"], env["agent"]
+    token = _deploy_partial_hook(env)
+    # Fund with a full move (shortfall is 0 until the test sets it).
+    jid = _make_delivered(env, amount=10 * ONE, token=token.address)
+    assert token.functions.balanceOf(escrow.address).call() == 10 * ONE
+    # Arm the invariant-reading hook and set a 1-unit shortfall, so
+    # the payout leg moves 10 ONE - 1 and then calls back.
+    token.functions.setHook(escrow.address, escrow.encode_abi("settlementInvariant", args=[token.address])).transact({"from": payer})
+    token.functions.setShortfall(1).transact({"from": payer})
+    agent_before = token.functions.balanceOf(agent).call()
+    escrow.functions.release(jid).transact({"from": payer})
+    # Transient observation, mid-call: escrow kept 1, unsettled
+    # already subtracted, credit not yet recorded -> holds False.
+    balance, unsettled, credits, holds = _decode_invariant(token.functions.lastHookReturndata().call())
+    assert (balance, unsettled, credits) == (1, 0, 0)
+    assert holds is False
+    # Settled state, after the call: the 1-unit shortfall is credited
+    # and the invariant holds.
+    assert _state(env, jid) == 4  # State.Released
+    assert token.functions.balanceOf(agent).call() == agent_before + 10 * ONE - 1
+    assert escrow.functions.pendingWithdrawals(token.address, agent).call() == 1
+    assert escrow.functions.totalPendingCredits(token.address).call() == 1
+    assert token.functions.balanceOf(escrow.address).call() == 1
+    balance, unsettled, credits, holds = escrow.functions.settlementInvariant(token.address).call()
+    assert (balance, unsettled, credits, holds) == (1, 0, 1, True)
+    token.functions.setHook(ZERO, b"").transact({"from": payer})
 
 
 def test_claim_windows_helper_matches_behavior(env):
@@ -1670,11 +1894,16 @@ def test_settlement_invariant_view_gas_pinned_at_load(env):
     the test, so the load is exactly 50 jobs regardless of test order
     and the ambient fixture is untouched. The view is a read: the
     figure is measured with eth_estimateGas (which includes its
-    21,000 intrinsic base — the pure view cost is ~366,000, ~7,000
-    gas per job) and pinned under GAS_CEILING_INVARIANT_VIEW with
-    ~2x headroom. The ceiling is a regression tripwire for on-chain
-    callers, not a hard limit: off-chain monitors read the view via
-    eth_call, which has no block gas limit in practice."""
+    21,000 intrinsic base).
+    ROUND 17 (Oct 28, 2026): the view is O(1) now — the scan was
+    replaced by the totalUnsettled accumulator — so the test pins
+    flatness as well as the ceiling: the 50-job gas must be within
+    1,000 gas of the 0-job gas on the same escrow. Measured on this
+    toolchain (eth-tester/PyEVM, Oct 28, 2026): 36,069 at 0 jobs,
+    36,070 at 50 jobs (vs 387,382 at 50 jobs under the old scan).
+    The ceiling is a regression tripwire for on-chain callers, not
+    a hard limit: off-chain monitors read the view via eth_call,
+    which has no block gas limit in practice."""
     w3 = env["w3"]
     payer, agent = env["payer"], env["agent"]
 
@@ -1690,6 +1919,11 @@ def test_settlement_invariant_view_gas_pinned_at_load(env):
     token.functions.mint(payer, 10_000 * ONE).transact({"from": payer})
     token.functions.approve(escrow.address, 10_000 * ONE).transact({"from": payer})
 
+    # ROUND 17: the 0-job baseline — the flatness check compares the
+    # loaded view against this, on the same escrow.
+    gas0 = escrow.functions.settlementInvariant(token.address).estimate_gas(
+        {"from": payer})
+
     N_JOBS = 50
     for _ in range(N_JOBS):
         escrow.functions.createJob(agent, token.address, 10 * ONE, 3600, 600,
@@ -1704,6 +1938,11 @@ def test_settlement_invariant_view_gas_pinned_at_load(env):
     gas = escrow.functions.settlementInvariant(token.address).estimate_gas(
         {"from": payer})
     assert gas <= GAS_CEILING_INVARIANT_VIEW
+    # ROUND 17: flat in jobCount — the accumulator replaced the scan,
+    # so 50 jobs must cost the same as 0 jobs (within estimate noise).
+    assert gas - gas0 <= 1_000, (
+        f"view gas grew with job count: {gas0} at 0 jobs, {gas} at 50 jobs"
+    )
 
     # ROUND 15 (Grok round-13 improvement 1): the same measurement with
     # a NON-ZERO prior credit total, so the view's credit-sum path is
@@ -1714,15 +1953,19 @@ def test_settlement_invariant_view_gas_pinned_at_load(env):
     # of paid), and then 50 unsettled jobs are created in the same
     # token. The view must be exactly [510, 500, 10, True] and its gas
     # must fit the SAME ceiling — the credit sum is one mapping read,
-    # so the credit path costs the scan plus ~nothing. Measured on
-    # this toolchain (eth-tester/PyEVM, Oct 28, 2026): 387,382 gas —
-    # identical to the pure-unsettled measurement, as expected, since
-    # the credit sum is a single SLOAD whose stored value does not
-    # change its cost.
+    # so the credit path costs the scan plus ~nothing. ROUND 17: the
+    # scan is gone, so the credit path is one mapping read on top of
+    # an O(1) view — the 50-job gas is the same ~36,070 as the pure
+    # path (measured Oct 28, 2026), and the flatness check below
+    # pins that the loaded view costs no more than the empty one.
     bad = deploy("MalformedReturnToken")
     escrow2 = deploy("AgentEscrow")
     bad.functions.mint(payer, 10_000 * ONE).transact({"from": payer})
     bad.functions.approve(escrow2.address, 10_000 * ONE).transact({"from": payer})
+    # ROUND 17: the 0-job baseline for this escrow — the flatness
+    # check at the end compares the loaded view against it.
+    gas2_0 = escrow2.functions.settlementInvariant(bad.address).estimate_gas(
+        {"from": payer})
     bad.functions.setMode(3).transact({"from": payer})  # well-behaved for funding
     escrow2.functions.createJob(agent, bad.address, 10 * ONE, 3600, 600,
                                 "ipfs://t", ZERO).transact({"from": payer})
@@ -1745,6 +1988,13 @@ def test_settlement_invariant_view_gas_pinned_at_load(env):
     gas2 = escrow2.functions.settlementInvariant(bad.address).estimate_gas(
         {"from": payer})
     assert gas2 <= GAS_CEILING_INVARIANT_VIEW
+    # ROUND 17: flatness on the credited path too — the loaded view
+    # with a non-zero credit total costs no more than the empty view
+    # measured on this escrow before any job existed.
+    assert gas2 - gas2_0 <= 1_000, (
+        f"view gas grew with job count on the credited path: {gas2_0} at "
+        f"0 jobs, {gas2} at 51 jobs"
+    )
 
 
 # ---- Round 16 (Oct 28, 2026): Claude round-15 improvements ----
@@ -1755,6 +2005,11 @@ def test_randomized_state_machine_invariant_holds(env):
     tokens and asserts settlementInvariant(token).holds after every
     step. It checks the strongest claim in the design — that no path
     creates or destroys funds — over sequences nobody hand-wrote.
+    ROUND 18: after every step it also cross-checks the accumulator
+    against the manual scan (_check_accumulator per token) — the
+    holds check alone verifies the view's internal consistency, not
+    the accumulator against ground truth, so a transient drift a
+    later step repairs would otherwise be missed.
     Fixed seed (20261028), so the test is deterministic: same seed,
     same sequence, every run. Runs on a FRESH escrow + fresh tokens
     deployed inside the test, so it is independent of the shared
@@ -1863,6 +2118,14 @@ def test_randomized_state_machine_invariant_holds(env):
         except TransactionFailed:
             reverted += 1
         holds_all()
+        # ROUND 18: cross-check the accumulator against the manual scan
+        # after EVERY step, not only at the end — a transient drift a
+        # later step repairs must not be missed. (holds_all checks the
+        # view's internal consistency; this checks the accumulator
+        # against ground truth. _check_accumulator is defined below
+        # the test but resolves at call time, after module load.)
+        for token in tokens.values():
+            _check_accumulator(escrow, token.address)
     # The machine was actually exercised, not just reverted out of
     # every step: at least a fifth of the steps must have succeeded.
     # (Measured with seed 20261028: 25 succeeded, 35 reverted — the
@@ -1882,6 +2145,210 @@ def test_randomized_state_machine_invariant_holds(env):
             credits += escrow.functions.pendingWithdrawals(token.address, acct).call()
         balance = token.functions.balanceOf(escrow.address).call()
         assert balance == unsettled + credits
+        # ROUND 17: the accumulator must equal the manual scan after
+        # 60 random steps across every settlement path — a drift in
+        # totalUnsettled that the per-step holds checks somehow
+        # missed would show here, against the ground-truth scan.
+        assert escrow.functions.totalUnsettled(token.address).call() == unsettled
+
+
+# ---- Round 17 (Oct 28, 2026): Grok round-16 improvements ----
+
+def _manual_unsettled(escrow, token_address):
+    """Manual scan sum of unsettled job amounts for one token on one
+    escrow — the cross-check totalUnsettled must always equal."""
+    unsettled = 0
+    for jid in range(escrow.functions.jobCount().call()):
+        job = escrow.functions.getJob(jid).call()
+        if job[2].lower() == token_address.lower() and job[6] in _UNSETTLED_STATES:
+            unsettled += job[3]
+    return unsettled
+
+
+def _check_accumulator(escrow, token_address):
+    """totalUnsettled == manual scan, and the view's unsettledSum is
+    the same, and holds is True. One call, used after every step."""
+    manual = _manual_unsettled(escrow, token_address)
+    assert escrow.functions.totalUnsettled(token_address).call() == manual, (
+        f"totalUnsettled drifted for {token_address}: "
+        f"accumulator {escrow.functions.totalUnsettled(token_address).call()} "
+        f"!= manual scan {manual}"
+    )
+    balance, unsettled, credits, holds = escrow.functions.settlementInvariant(token_address).call()
+    assert unsettled == manual
+    assert holds is True
+
+
+def test_total_unsettled_tracks_every_settlement_path(env):
+    """Grok improvements 1 + 2 (round 17): totalUnsettled[token] is
+    the O(1) unsettled sum settlementInvariant reads. It must equal
+    a manual scan of the jobs after every step — create adds the
+    received amount, every terminal settlement subtracts the job's
+    amount — across all seven settlement paths and across two tokens
+    (the fee token's net-received funding is the trap: a 10 ONE
+    funding stores 9.9 ONE, and the accumulator must add 9.9, not
+    10). Runs on a FRESH escrow + fresh tokens, so the sums are
+    exactly the jobs this test creates."""
+    w3 = env["w3"]
+    payer, agent = env["payer"], env["agent"]
+
+    def deploy(name):
+        artifact = json.loads((ROOT / "build" / f"{name}.json").read_text())
+        c = w3.eth.contract(abi=artifact["abi"], bytecode=artifact["bin"])
+        tx = c.constructor().transact({"from": payer})
+        rc = w3.eth.wait_for_transaction_receipt(tx)
+        return w3.eth.contract(address=rc.contractAddress, abi=artifact["abi"])
+
+    escrow = deploy("AgentEscrow")
+    musdc = deploy("MockUSDC")
+    fee = deploy("FeeToken")
+    for token in (musdc, fee):
+        token.functions.mint(payer, 10_000 * ONE).transact({"from": payer})
+        token.functions.approve(escrow.address, 10_000 * ONE).transact({"from": payer})
+
+    def delivered(token, amount=10 * ONE, window=600):
+        escrow.functions.createJob(agent, token.address, amount, 3600, window, "ipfs://t", ZERO).transact({"from": payer})
+        jid = escrow.functions.jobCount().call() - 1
+        escrow.functions.acceptJob(jid, ZERO).transact({"from": agent})
+        escrow.functions.submitDelivery(jid, Web3.keccak(text="deliverable")).transact({"from": agent})
+        return jid
+
+    def check_both():
+        _check_accumulator(escrow, musdc.address)
+        _check_accumulator(escrow, fee.address)
+
+    # Empty: both totals zero, view holds.
+    assert escrow.functions.totalUnsettled(musdc.address).call() == 0
+    assert escrow.functions.totalUnsettled(fee.address).call() == 0
+    check_both()
+
+    # Create: the accumulator adds the RECEIVED amount — 10 ONE of
+    # MockUSDC, and 9.9 ONE of the 1%-fee token (job stores 9.9).
+    jid_a = delivered(musdc)
+    assert escrow.functions.totalUnsettled(musdc.address).call() == 10 * ONE
+    check_both()
+    jid_f = delivered(fee)
+    assert escrow.functions.getJob(jid_f).call()[3] == 99 * ONE // 10
+    assert escrow.functions.totalUnsettled(fee.address).call() == 99 * ONE // 10
+    check_both()
+
+    # Release (payer): both totals drop by the settled job's amount.
+    escrow.functions.release(jid_a).transact({"from": payer})
+    assert escrow.functions.totalUnsettled(musdc.address).call() == 0
+    check_both()
+    escrow.functions.release(jid_f).transact({"from": payer})
+    assert escrow.functions.totalUnsettled(fee.address).call() == 0
+    check_both()
+
+    # Release (agent claim): same release(), different caller branch —
+    # after the review window ends with no dispute, the agent claims
+    # with no payer action. The total must drop exactly as for the
+    # payer release. (ROUND 18: Claude round-17 improvement 3 — this
+    # was the only settlement entry point not exercised here.)
+    jid = delivered(musdc)  # window 600
+    assert escrow.functions.totalUnsettled(musdc.address).call() == 10 * ONE
+    _travel(env, 700)  # past deliveredAt + reviewWindow (strict >)
+    escrow.functions.release(jid).transact({"from": agent})
+    assert escrow.functions.totalUnsettled(musdc.address).call() == 0
+    check_both()
+
+    # Timeout refund: create a 5s job, travel past, refund.
+    escrow.functions.createJob(agent, musdc.address, 5 * ONE, 5, 0, "ipfs://t", ZERO).transact({"from": payer})
+    jid = escrow.functions.jobCount().call() - 1
+    assert escrow.functions.totalUnsettled(musdc.address).call() == 5 * ONE
+    _travel(env, 100)
+    escrow.functions.refundAfterDeadline(jid).transact({"from": payer})
+    assert escrow.functions.totalUnsettled(musdc.address).call() == 0
+    check_both()
+
+    # Cancel before accept.
+    escrow.functions.createJob(agent, musdc.address, 7 * ONE, 3600, 0, "ipfs://t", ZERO).transact({"from": payer})
+    jid = escrow.functions.jobCount().call() - 1
+    assert escrow.functions.totalUnsettled(musdc.address).call() == 7 * ONE
+    escrow.functions.cancel(jid).transact({"from": payer})
+    assert escrow.functions.totalUnsettled(musdc.address).call() == 0
+    check_both()
+
+    # Cancel unaccepted after deadline.
+    escrow.functions.createJob(agent, musdc.address, 3 * ONE, 5, 0, "ipfs://t", ZERO).transact({"from": payer})
+    jid = escrow.functions.jobCount().call() - 1
+    _travel(env, 100)
+    escrow.functions.cancelUnaccepted(jid).transact({"from": payer})
+    assert escrow.functions.totalUnsettled(musdc.address).call() == 0
+    check_both()
+
+    # Dispute resolved to the agent.
+    jid = delivered(musdc)
+    escrow.functions.raiseDispute(jid).transact({"from": payer})
+    check_both()  # Disputed still unsettled — the total must NOT move
+    escrow.functions.resolveDispute(jid, True).transact({"from": payer})
+    assert escrow.functions.totalUnsettled(musdc.address).call() == 0
+    check_both()
+
+    # Dispute resolved to the payer (refund).
+    jid = delivered(musdc)
+    escrow.functions.raiseDispute(jid).transact({"from": payer})
+    escrow.functions.resolveDispute(jid, False).transact({"from": payer})
+    assert escrow.functions.totalUnsettled(musdc.address).call() == 0
+    check_both()
+
+    # Dispute timeout settles to the agent.
+    jid = delivered(musdc)
+    escrow.functions.raiseDispute(jid).transact({"from": payer})
+    dispute_period = escrow.functions.DISPUTE_PERIOD().call()
+    _travel(env, 600 + dispute_period + 100)
+    escrow.functions.settleDisputeTimeout(jid).transact({"from": agent})
+    assert escrow.functions.totalUnsettled(musdc.address).call() == 0
+    check_both()
+
+
+def test_total_unsettled_credited_release(env):
+    """Grok improvements 1 + 2 (round 17): the credited path is the
+    trap for the accumulator — on a credited release the balance does
+    NOT move (the payout failed and the amount is recorded as a pull
+    credit), so a total maintained from balance deltas would be
+    wrong. The accumulator subtracts the JOB's amount on settlement,
+    whatever the payout did, so the equation still holds: the credit
+    sum rises by exactly the amount the unsettled sum drops. Runs on
+    a FRESH escrow + fresh MalformedReturnToken."""
+    w3 = env["w3"]
+    payer, agent = env["payer"], env["agent"]
+
+    def deploy(name):
+        artifact = json.loads((ROOT / "build" / f"{name}.json").read_text())
+        c = w3.eth.contract(abi=artifact["abi"], bytecode=artifact["bin"])
+        tx = c.constructor().transact({"from": payer})
+        rc = w3.eth.wait_for_transaction_receipt(tx)
+        return w3.eth.contract(address=rc.contractAddress, abi=artifact["abi"])
+
+    escrow = deploy("AgentEscrow")
+    bad = deploy("MalformedReturnToken")
+    bad.functions.mint(payer, 10_000 * ONE).transact({"from": payer})
+    bad.functions.approve(escrow.address, 10_000 * ONE).transact({"from": payer})
+
+    bad.functions.setMode(3).transact({"from": payer})  # well-behaved for funding
+    escrow.functions.createJob(agent, bad.address, 10 * ONE, 3600, 600, "ipfs://t", ZERO).transact({"from": payer})
+    jid = escrow.functions.jobCount().call() - 1
+    escrow.functions.acceptJob(jid, ZERO).transact({"from": agent})
+    escrow.functions.submitDelivery(jid, Web3.keccak(text="deliverable")).transact({"from": agent})
+    assert escrow.functions.totalUnsettled(bad.address).call() == 10 * ONE
+    _check_accumulator(escrow, bad.address)
+
+    bad.functions.setMode(0).transact({"from": payer})  # malformed: credits on release
+    escrow.functions.release(jid).transact({"from": payer})
+    # The job left unsettled (total 0) while the balance stayed put
+    # and the credit took the amount instead.
+    assert escrow.functions.totalUnsettled(bad.address).call() == 0
+    assert escrow.functions.pendingWithdrawals(bad.address, agent).call() == 10 * ONE
+    assert escrow.functions.totalPendingCredits(bad.address).call() == 10 * ONE
+    assert escrow.functions.settlementInvariant(bad.address).call() == [10 * ONE, 0, 10 * ONE, True]
+    _check_accumulator(escrow, bad.address)
+
+    # Withdraw drains the credit; the equation holds with it gone.
+    bad.functions.setMode(3).transact({"from": payer})
+    escrow.functions.withdraw(bad.address).transact({"from": agent})
+    assert escrow.functions.settlementInvariant(bad.address).call() == [0, 0, 0, True]
+    _check_accumulator(escrow, bad.address)
 
 
 if __name__ == "__main__":

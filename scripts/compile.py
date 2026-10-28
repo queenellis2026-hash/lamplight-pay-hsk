@@ -29,7 +29,7 @@ def main() -> None:
 
     build_dir = ROOT / "build"
     build_dir.mkdir(exist_ok=True)
-    for name in ("MockUSDC", "AgentEscrow", "FeeToken", "NoBoolToken", "BlocklistToken", "HookToken", "MalformedReturnToken", "VanishingToken"):
+    for name in ("MockUSDC", "AgentEscrow", "FeeToken", "NoBoolToken", "BlocklistToken", "HookToken", "HookAfterToken", "MalformedReturnToken", "VanishingToken", "PartialHookToken"):
         src = ROOT / "contracts" / f"{name}.sol"
         compiled = solcx.compile_source(
             src.read_text(), output_values=["abi", "bin"], solc_version=SOLC_VERSION

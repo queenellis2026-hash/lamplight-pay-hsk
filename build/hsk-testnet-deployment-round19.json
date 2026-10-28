@@ -1,0 +1,9 @@
+{
+  "network": "HSKChain Testnet",
+  "chain_id": 133,
+  "rpc": "https://testnet.hsk.xyz",
+  "deployer": "0x995646c5270f26a8D64df58D7bc7e8277c606e27",
+  "code": "round 19+20",
+  "MockUSDC": "0xEF346652eeB233662E7d290d222175895d53ef15",
+  "AgentEscrow": "0xAB70612F45d9cf914D129b0DB71DE243dD55813C"
+}

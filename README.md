@@ -97,7 +97,7 @@ scripts/
   demo.py               3 end-to-end scenarios on a local EVM, writes receipts
   deploy_hsk_testnet.py deploy to HSK testnet (chain 133) — see below
 tests/
-  test_flow.py          71 tests: happy path, timeout refund, stranger guard,
+  test_flow.py          85 tests: happy path, timeout refund, stranger guard,
                     quote, review-window lifecycle, review-window cap (30
                     days) + boundary, fee/no-bool tokens,
                     cancelUnaccepted, mint access control, blocklisted
@@ -123,7 +123,12 @@ tests/
                     by monitors) plus a second cold-path gas pinning
                     under a non-zero prior credit, and agent-side
                     arbiter confirmation at acceptJob (mismatch reverts,
-                    JobAccepted carries the confirmed arbiter)
+                    JobAccepted carries the confirmed arbiter), randomized
+                    state-machine invariant test, totalUnsettled tracking
+                    across settlement paths, hook-window tests
+                    (withdraw/release true, createJob false-by-design),
+                    withdrawTo hook test, failed-withdrawal atomicity test,
+                    partial-transfer transient-window test
 demo-receipts/          quote + receipts produced by the demo run
 ```
 
@@ -131,9 +136,9 @@ demo-receipts/          quote + receipts produced by the demo run
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install web3 eth-tester py-solc-x py-evm pytest
-.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 21,919 B
+.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 22,778 B
 .venv/bin/python scripts/demo.py      # 3 scenarios, all pass
-.venv/bin/python -m pytest tests/ -v  # 77 passed
+.venv/bin/python -m pytest tests/ -v  # 85 passed
 ```
 
 Demo result (local EVM, real tx hashes in `demo-receipts/`):
@@ -155,15 +160,18 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
 
 ## Status / honest limitations
 
-- **Testnet deployment DONE Oct 28, 2026 ~1:14 AM CDT (round-16 contracts, redeployed; Blockscout-verified).**
-  [AgentEscrow `0xF1c84737AAc850546d84C54d60B3b18fF82F8afA`](https://testnet-explorer.hskchain.net/address/0xF1c84737AAc850546d84C54d60B3b18fF82F8afA)
-  and [MockUSDC `0x00835c4588461353B4B284437d7D65c466587375`](https://testnet-explorer.hskchain.net/address/0x00835c4588461353B4B284437d7D65c466587375),
+- **Testnet deployment DONE Oct 28, 2026 (round-19+20 code; Blockscout-verified, partial match).**
+  [AgentEscrow `0xAB70612F45d9cf914D129b0DB71DE243dD55813C`](https://testnet-explorer.hskchain.net/address/0xAB70612F45d9cf914D129b0DB71DE243dD55813C)
+  and [MockUSDC `0xEF346652eeB233662E7d290d222175895d53ef15`](https://testnet-explorer.hskchain.net/address/0xEF346652eeB233662E7d290d222175895d53ef15),
   live on HSKChain Testnet (chain ID 133), recorded in
-  `build/hsk-testnet-deployment.json`. The deploy script
+  `build/hsk-testnet-deployment-round19.json`. A live demo ran against
+  these contracts Oct 28, 2026 (flows A/B/C + stranger guards, escrow
+  ends at 0, settlementInvariant reads (0, 0, 0, true)) — see STATUS.md.
+  The deploy script
   (`scripts/deploy_hsk_testnet.py`) checks the chain ID is 133 and takes a
-  testnet-only deployer key from `DEPLOYER_KEY`. Honest note: no escrow
-  transaction has run against the deployed contracts yet — the demo scenarios
-  ran on a local EVM, so the on-chain history is the two deployments only.
+  testnet-only deployer key from `DEPLOYER_KEY`. Superseded round-16
+  contracts: AgentEscrow `0xF1c84737AAc850546d84C54d60B3b18fF82F8afA`,
+  MockUSDC `0x00835c4588461353B4B284437d7D65c466587375`.
 - **Demo video DONE Oct 28, 2026 (v4).** 2:05 narrated walkthrough
   (`build/demo-video-v4.mp4`), Unlisted on YouTube at
   https://youtu.be/6lGHXO1dEVM — the three demo scenarios plus the
@@ -231,7 +239,7 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   upgrades (invariant view 387,382 gas under an 800,000 ceiling at 50
   jobs; acceptJob 53,521 under 110,000; return-bomb 19,000,000;
   gas-burning path 19,900,000).
-- **Tests: 77**, covering every path above (see Repo layout). Full round
+- **Tests: 85**, covering every path above (see Repo layout). Full round
   history: `STATUS.md` and `reviews-2026-10-27.md`.
 - **Eligibility verified:** the hackathon is **online and global**. The
   organiser's Eventbrite listing says "Online event", "An online hackathon in

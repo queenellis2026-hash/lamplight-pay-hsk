@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lamplight Pay — Live User Journey (HSK Testnet)</title>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.2/dist/ethers.umd.min.js"></script>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 900px; margin: 0 auto; padding: 16px; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.5rem; margin-bottom: 4px; }
+  h2 { font-size: 1.1rem; margin: 0 0 10px 0; }
+  .sub { color: #555; margin-top: 0; }
+  section { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 14px; margin: 14px 0; }
+  label { display: block; font-size: 0.85rem; color: #444; margin: 8px 0 2px 0; }
+  input, select { width: 100%; box-sizing: border-box; padding: 7px; font-size: 0.95rem; border: 1px solid #ccc; border-radius: 5px; }
+  input.mono, .mono { font-family: ui-monospace, monospace; font-size: 0.85rem; word-break: break-all; }
+  button { padding: 8px 14px; margin: 6px 6px 6px 0; font-size: 0.95rem; border: 1px solid #888; border-radius: 5px; background: #f0f0f0; cursor: pointer; }
+  button.primary { background: #1a5c2a; color: #fff; border-color: #1a5c2a; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 180px; }
+  .note { background: #fff8e1; border: 1px solid #e6c200; border-radius: 5px; padding: 8px 10px; font-size: 0.9rem; margin: 8px 0; }
+  .warn { background: #fdecea; border: 1px solid #d9534f; border-radius: 5px; padding: 8px 10px; font-size: 0.9rem; margin: 8px 0; }
+  .ok { color: #1a5c2a; }
+  .bad { color: #b00020; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+  td { border-bottom: 1px solid #eee; padding: 5px 6px; vertical-align: top; }
+  td:first-child { color: #555; white-space: nowrap; }
+  #log li { margin-bottom: 8px; font-size: 0.9rem; }
+  #status { font-weight: 600; }
+  a { color: #1a4d8f; }
+</style>
+</head>
+<body>
+<h1>Lamplight Pay — Live User Journey</h1>
+<p class="sub">Escrowed settlement for agent-to-agent work, running against the <b>live HSK testnet deployment</b>. No backend, no keys stored — everything runs in your browser with your own wallet.</p>
+
+<div class="warn"><b>Testnet only.</b> This page refuses any chain other than HSK testnet (chain 133). Nothing here touches mainnet, and no real funds are involved. The demo token is a clearly-labelled test token, not real USDC.</div>
+
+<section id="wallet-sec">
+  <h2>1. Wallet &amp; network</h2>
+  <button id="btn-connect" class="primary">Connect wallet</button>
+  <button id="btn-chain">Switch / add HSK testnet (133)</button>
+  <p>Status: <span id="status">Not connected</span></p>
+  <p>Address: <span id="addr" class="mono">—</span><br>
+  Chain: <span id="chain">—</span></p>
+  <p>tHSK balance: <span id="bal-native">—</span><br>
+  Token balance (<span id="bal-token-symbol">mUSDC</span>): <span id="bal-token">—</span><br>
+  Allowance to escrow: <span id="allowance">—</span>
+  <button id="btn-refresh">Refresh balances</button></p>
+  <p>Contracts:
+    <br>AgentEscrow <a class="mono" href="https://testnet-explorer.hskchain.net/address/0xAB70612F45d9cf914D129b0DB71DE243dD55813C" target="_blank" rel="noopener">0xAB70612F45d9cf914D129b0DB71DE243dD55813C</a>
+    <br>MockUSDC <a class="mono" href="https://testnet-explorer.hskchain.net/address/0xEF346652eeB233662E7d290d222175895d53ef15" target="_blank" rel="noopener">0xEF346652eeB233662E7d290d222175895d53ef15</a>
+  </p>
+</section>
+
+<section id="token-sec">
+  <h2>2. Token</h2>
+  <div class="note"><b>Test-token note — read this first.</b> The deployed MockUSDC's <code>mint</code> is <b>deployer-only</b>: only the deploying wallet can mint it, so you cannot mint mUSDC yourself from this page. If you do not already hold mUSDC, use the custom token field below with any ERC-20 test token you <i>do</i> hold on HSK testnet (for example, a token you deployed yourself for testing). The escrow works with any ERC-20; it does not require mUSDC specifically. The Mint button below is included for the deployer only and will revert for everyone else.</div>
+  <label>Token address
+    <input id="token-addr" class="mono" value="0xEF346652eeB233662E7d290d222175895d53ef15">
+  </label>
+  <label>Token decimals
+    <input id="token-decimals" value="6">
+  </label>
+  <button id="btn-token">Use this token</button>
+  <span id="token-info"></span>
+  <div class="row">
+    <div><label>Mint to (deployer only)
+      <input id="mint-to" class="mono" placeholder="0x…">
+    </label></div>
+    <div><label>Mint amount (token units)
+      <input id="mint-amount" placeholder="e.g. 1000">
+    </label></div>
+  </div>
+  <button id="btn-mint">Mint (deployer only — reverts otherwise)</button>
+</section>
+
+<section id="create-sec">
+  <h2>3. Create a job (payer)</h2>
+  <p>First approve the escrow to pull your tokens, then create the job. The stored amount is what actually arrives (fee-on-transfer tokens fund the net amount).</p>
+  <div class="row">
+    <div><label>Approve amount (token units)
+      <input id="approve-amount" placeholder="e.g. 50">
+    </label></div>
+  </div>
+  <button id="btn-approve">Approve escrow</button>
+  <div class="row">
+    <div><label>Agent address
+      <input id="job-agent" class="mono" placeholder="0x… (cannot be your own address)">
+    </label></div>
+    <div><label>Amount (token units)
+      <input id="job-amount" placeholder="e.g. 50">
+    </label></div>
+  </div>
+  <div class="row">
+    <div><label>Deadline (seconds from now)
+      <input id="job-deadline" value="3600">
+    </label></div>
+    <div><label>Review window (seconds, max 2592000 = 30 days)
+      <input id="job-window" value="600">
+    </label></div>
+  </div>
+  <label>Metadata URI (job spec / quote id, free text)
+    <input id="job-meta" placeholder="e.g. ipfs://… or a job description id">
+  </label>
+  <label>Arbiter (optional — blank means the payer resolves disputes)
+    <input id="job-arbiter" class="mono" placeholder="0x… or blank">
+  </label>
+  <button id="btn-create" class="primary">Create job</button>
+  <span id="create-result"></span>
+</section>
+
+<section id="job-sec">
+  <h2>4. Job</h2>
+  <div class="row">
+    <div><label>Job ID
+      <input id="job-id" value="0">
+    </label></div>
+  </div>
+  <button id="btn-load">Load job</button>
+  <button id="btn-latest">Load latest job</button>
+  <span id="job-count"></span>
+  <table id="job-table" style="display:none">
+    <tr><td>State</td><td id="j-state"></td></tr>
+    <tr><td>Payer</td><td id="j-payer" class="mono"></td></tr>
+    <tr><td>Agent</td><td id="j-agent" class="mono"></td></tr>
+    <tr><td>Token</td><td id="j-token" class="mono"></td></tr>
+    <tr><td>Amount</td><td id="j-amount"></td></tr>
+    <tr><td>Deadline</td><td id="j-deadline"></td></tr>
+    <tr><td>Review window</td><td id="j-window"></td></tr>
+    <tr><td>Delivery hash</td><td id="j-hash" class="mono"></td></tr>
+    <tr><td>Metadata URI</td><td id="j-meta"></td></tr>
+    <tr><td>Delivered at</td><td id="j-delivered"></td></tr>
+    <tr><td>Arbiter</td><td id="j-arbiter" class="mono"></td></tr>
+    <tr><td>Agent may claim at</td><td id="j-claim"></td></tr>
+    <tr><td>Dispute timeout at</td><td id="j-timeout"></td></tr>
+  </table>
+</section>
+
+<section id="actions-sec">
+  <h2>5. Actions (all use the Job ID above)</h2>
+  <h3>Agent</h3>
+  <label>Expected arbiter (must match the job's arbiter; blank = payer-as-arbiter)
+    <input id="accept-arbiter" class="mono" placeholder="0x… or blank">
+  </label>
+  <button id="btn-accept">Accept job (agent)</button>
+  <label>Delivery text (hashed with keccak256) — or paste a raw 0x bytes32 hash
+    <input id="delivery-text" placeholder="e.g. delivery report text, or 0x…hash">
+  </label>
+  <button id="btn-deliver">Submit delivery (agent)</button>
+  <h3>Payer</h3>
+  <button id="btn-release">Release (payer, or agent after review window)</button>
+  <button id="btn-refund">Refund after deadline (payer)</button>
+  <button id="btn-cancel">Cancel before accept (payer)</button>
+  <button id="btn-cancel-unacc">Cancel unaccepted after deadline (payer)</button>
+  <h3>Dispute</h3>
+  <button id="btn-dispute">Raise dispute (payer or agent, inside review window)</button>
+  <label>Resolve dispute (arbiter only — or payer when no arbiter set)
+    <select id="resolve-choice">
+      <option value="true">Pay the agent</option>
+      <option value="false">Refund the payer</option>
+    </select>
+  </label>
+  <button id="btn-resolve">Resolve dispute</button>
+  <button id="btn-timeout">Settle dispute timeout (either party, after dispute period)</button>
+  <h3>Pull credits</h3>
+  <button id="btn-withdraw">Withdraw my credit</button>
+  <label>Withdraw my credit to a different address (use when the credited address is blocklisted)
+    <input id="withdraw-to" class="mono" placeholder="0x…">
+  </label>
+  <button id="btn-withdraw-to">Withdraw to address</button>
+</section>
+
+<section id="views-sec">
+  <h2>6. Views</h2>
+  <button id="btn-invariant">Check settlement invariant (current token)</button>
+  <div id="invariant-out"></div>
+  <label>Credit holder address (defaults to your wallet)
+    <input id="credit-addr" class="mono" placeholder="0x…">
+  </label>
+  <button id="btn-credit">Check pull credit</button>
+  <div id="credit-out"></div>
+</section>
+
+<section id="log-sec">
+  <h2>Activity</h2>
+  <ul id="log"></ul>
+</section>
+
+<p class="sub">No private keys are ever entered here. Your wallet signs every transaction, and every transaction hash below links to the Blockscout testnet explorer. If a transaction reverts, the readable revert reason is shown in the log.</p>
+
+<script>
+const ESCROW_ADDRESS = "0xAB70612F45d9cf914D129b0DB71DE243dD55813C";
+const DEFAULT_TOKEN = "0xEF346652eeB233662E7d290d222175895d53ef15";
+const CHAIN_ID = 133;
+const CHAIN_ID_HEX = "0x85";
+const RPC_URL = "https://testnet.hsk.xyz";
+const EXPLORER = "https://testnet-explorer.hskchain.net";
+const STATES = ["Created", "Accepted", "Delivered", "Disputed", "Released", "Refunded", "Cancelled"];
+
+const ESCROW_ABI = [
+  "function createJob(address agent, address token, uint256 amount, uint256 deadlineSeconds, uint256 reviewWindowSeconds, string metadataURI, address arbiter) returns (uint256)",
+  "function acceptJob(uint256 jobId, address expectedArbiter)",
+  "function submitDelivery(uint256 jobId, bytes32 deliveryHash)",
+  "function release(uint256 jobId)",
+  "function refundAfterDeadline(uint256 jobId)",
+  "function cancel(uint256 jobId)",
+  "function cancelUnaccepted(uint256 jobId)",
+  "function raiseDispute(uint256 jobId)",
+  "function resolveDispute(uint256 jobId, bool releaseToAgent)",
+  "function settleDisputeTimeout(uint256 jobId)",
+  "function withdraw(address token)",
+  "function withdrawTo(address token, address to)",
+  "function getJob(uint256 jobId) view returns (tuple(address payer, address agent, address token, uint256 amount, uint256 deadline, uint256 reviewWindow, uint8 state, bytes32 deliveryHash, string metadataURI, uint256 deliveredAt, address arbiter))",
+  "function jobCount() view returns (uint256)",
+  "function settlementInvariant(address token) view returns (uint256 balance, uint256 unsettledSum, uint256 pendingCreditsSum, bool holds)",
+  "function pendingWithdrawals(address token, address account) view returns (uint256)",
+  "function pendingCredit(address token, address account) view returns (uint256)",
+  "function claimWindows(uint256 jobId) view returns (uint256 agentClaimAt, uint256 disputeTimeoutAt)",
+  "function jobWindows(uint256 jobId) view returns (uint256 deliveredAt, uint256 agentClaimAt, uint256 disputeTimeoutAt, uint256 credit)",
+  "function DISPUTE_PERIOD() view returns (uint256)",
+  "function MAX_REVIEW_WINDOW() view returns (uint256)",
+  "function totalUnsettled(address token) view returns (uint256)",
+  "function totalPendingCredits(address token) view returns (uint256)"
+];
+
+const ERC20_ABI = [
+  "function balanceOf(address account) view returns (uint256)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function transfer(address to, uint256 amount) returns (bool)",
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)",
+  "function name() view returns (string)",
+  "function mint(address to, uint256 amount)",
+  "function owner() view returns (address)"
+];
+
+let provider = null, signer = null, account = null, escrow = null;
+let tokenAddress = DEFAULT_TOKEN, token = null, tokenDecimals = 6, tokenSymbol = "mUSDC";
+
+const $ = (id) => document.getElementById(id);
+const ZERO = "0x0000000000000000000000000000000000000000";
+
+function log(msg, txHash, ok) {
+  const li = document.createElement("li");
+  const cls = ok === false ? "bad" : (ok === true ? "ok" : "");
+  li.innerHTML = '<span class="' + cls + '">' + escapeHtml(msg) + "</span>" +
+    (txHash ? ' — <a class="mono" href="' + EXPLORER + "/tx/" + txHash + '" target="_blank" rel="noopener">' + txHash.slice(0, 18) + "…</a>" : "");
+  $("log").prepend(li);
+}
+function escapeHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function fmtErr(e) {
+  if (!e) return "unknown error";
+  if (e.code === 4001) return "Transaction rejected in wallet.";
+  if (e.reason) return e.reason;
+  const m = e.message || String(e);
+  let mm = m.match(/reverted with reason string "([^"]+)"/) || m.match(/execution reverted: ([^,("]+)/);
+  if (mm) return mm[1].trim();
+  if (e.shortMessage) return e.shortMessage;
+  return m.slice(0, 300);
+}
+function fmtTs(ts) {
+  const n = Number(ts);
+  if (!n) return "— (not delivered)";
+  return new Date(n * 1000).toISOString() + " (" + n + ")";
+}
+function needWallet() {
+  if (!signer) throw new Error("Connect your wallet first.");
+}
+async function needChain() {
+  needWallet();
+  const net = await provider.getNetwork();
+  if (Number(net.chainId) !== CHAIN_ID) {
+    throw new Error("Wrong chain: this page only works on HSK testnet (chain 133). Use the 'Switch / add HSK testnet' button.");
+  }
+}
+function jobId() {
+  const v = $("job-id").value.trim();
+  if (v === "" || isNaN(Number(v)) || Number(v) < 0) throw new Error("Enter a valid Job ID.");
+  return BigInt(v);
+}
+function addrInput(el, allowBlank) {
+  const v = $(el).value.trim();
+  if (v === "" && allowBlank) return ZERO;
+  if (!ethers.isAddress(v)) throw new Error("Invalid address in '" + el + "'.");
+  return v;
+}
+function unitsInput(el) {
+  const v = $(el).value.trim();
+  if (v === "") throw new Error("Enter an amount.");
+  return ethers.parseUnits(v, tokenDecimals);
+}
+async function send(label, fn) {
+  try {
+    await needChain();
+    log(label + " — waiting for wallet signature…");
+    const tx = await fn();
+    log(label + " — sent, waiting for confirmation…", tx.hash, null);
+    const receipt = await tx.wait();
+    if (receipt.status !== 1) { log(label + " — transaction reverted on-chain.", tx.hash, false); return null; }
+    log(label + " — confirmed.", tx.hash, true);
+    return receipt;
+  } catch (e) {
+    log(label + " — failed: " + fmtErr(e), null, false);
+    return null;
+  }
+}
+async function read(label, fn) {
+  try {
+    await needChain();
+    return await fn();
+  } catch (e) {
+    log(label + " — failed: " + fmtErr(e), null, false);
+    return null;
+  }
+}
+function refreshTokenContract() {
+  token = new ethers.Contract(tokenAddress, ERC20_ABI, signer || provider);
+}
+async function refreshBalances() {
+  try {
+    await needChain();
+    const [native, tbal, allow] = await Promise.all([
+      provider.getBalance(account),
+      token.balanceOf(account),
+      token.allowance(account, ESCROW_ADDRESS)
+    ]);
+    $("bal-native").textContent = ethers.formatEther(native) + " tHSK";
+    $("bal-token").textContent = ethers.formatUnits(tbal, tokenDecimals) + " " + tokenSymbol;
+    $("allowance").textContent = ethers.formatUnits(allow, tokenDecimals) + " " + tokenSymbol;
+  } catch (e) {
+    log("Refresh balances — failed: " + fmtErr(e), null, false);
+  }
+}
+
+// ---- Wallet / network ----
+$("btn-connect").onclick = async () => {
+  try {
+    if (!window.ethereum) throw new Error("No injected wallet found. Install MetaMask or another injected wallet, then reload.");
+    provider = new ethers.BrowserProvider(window.ethereum);
+    await provider.send("eth_requestAccounts", []);
+    signer = await provider.getSigner();
+    account = await signer.getAddress();
+    escrow = new ethers.Contract(ESCROW_ADDRESS, ESCROW_ABI, signer);
+    refreshTokenContract();
+    const net = await provider.getNetwork();
+    $("addr").textContent = account;
+    $("chain").textContent = Number(net.chainId) === CHAIN_ID ? "HSK testnet (133) ✓" : "WRONG CHAIN (" + Number(net.chainId) + ") — switch to HSK testnet (133)";
+    $("status").textContent = Number(net.chainId) === CHAIN_ID ? "Connected ✓" : "Connected — wrong chain";
+    $("status").className = Number(net.chainId) === CHAIN_ID ? "ok" : "bad";
+    log("Wallet connected: " + account);
+    if (Number(net.chainId) === CHAIN_ID) {
+      try {
+        tokenDecimals = Number(await token.decimals());
+        tokenSymbol = await token.symbol();
+        $("token-decimals").value = String(tokenDecimals);
+        $("bal-token-symbol").textContent = tokenSymbol;
+      } catch (e) { /* keep defaults; custom tokens may lack metadata */ }
+      await refreshBalances();
+    }
+  } catch (e) {
+    log("Connect — failed: " + fmtErr(e), null, false);
+  }
+};
+$("btn-chain").onclick = async () => {
+  try {
+    if (!window.ethereum) throw new Error("No injected wallet found.");
+    try {
+      await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN_ID_HEX }] });
+    } catch (e) {
+      if (e.code !== 4902) throw e;
+      await window.ethereum.request({
+        method: "wallet_addEthereumChain",
+        params: [{
+          chainId: CHAIN_ID_HEX,
+          chainName: "HSKChain Testnet",
+          nativeCurrency: { name: "HSK", symbol: "tHSK", decimals: 18 },
+          rpcUrls: [RPC_URL],
+          blockExplorerUrls: [EXPLORER]
+        }]
+      });
+    }
+    log("Switched to HSK testnet (133). Reconnect if balances do not update.");
+  } catch (e) {
+    log("Switch chain — failed: " + fmtErr(e), null, false);
+  }
+};
+if (window.ethereum) {
+  window.ethereum.on("chainChanged", () => window.location.reload());
+  window.ethereum.on("accountsChanged", () => window.location.reload());
+}
+$("btn-refresh").onclick = refreshBalances;
+
+// ---- Token ----
+$("btn-token").onclick = async () => {
+  try {
+    await needChain();
+    tokenAddress = addrInput("token-addr", false);
+    tokenDecimals = parseInt($("token-decimals").value.trim(), 10);
+    if (isNaN(tokenDecimals) || tokenDecimals < 0 || tokenDecimals > 18) throw new Error("Decimals must be 0–18.");
+    refreshTokenContract();
+    try {
+      const [sym, dec] = await Promise.all([token.symbol(), token.decimals()]);
+      tokenSymbol = sym; tokenDecimals = Number(dec);
+      $("token-decimals").value = String(tokenDecimals);
+      $("bal-token-symbol").textContent = tokenSymbol;
+      $("token-info").textContent = "Token: " + sym + " (" + tokenDecimals + " decimals)";
+    } catch (e) {
+      $("token-info").textContent = "Using custom token (symbol/decimals not readable — using " + tokenDecimals + " decimals).";
+    }
+    log("Token set to " + tokenAddress);
+    await refreshBalances();
+  } catch (e) {
+    log("Use token — failed: " + fmtErr(e), null, false);
+  }
+};
+$("btn-mint").onclick = async () => {
+  await send("Mint (deployer only)", async () => {
+    const to = addrInput("mint-to", false);
+    const amount = unitsInput("mint-amount");
+    return token.mint(to, amount);
+  });
+  await refreshBalances();
+};
+
+// ---- Create job ----
+$("btn-approve").onclick = async () => {
+  const r = await send("Approve escrow", async () => token.approve(ESCROW_ADDRESS, unitsInput("approve-amount")));
+  if (r) await refreshBalances();
+};
+$("btn-create").onclick = async () => {
+  try {
+    const agent = addrInput("job-agent", false);
+    if (agent.toLowerCase() === account.toLowerCase()) throw new Error("Agent cannot be your own address (payer cannot be agent).");
+    const amount = unitsInput("job-amount");
+    const deadline = BigInt($("job-deadline").value.trim());
+    const windowSecs = BigInt($("job-window").value.trim());
+    if (windowSecs > 2592000n) throw new Error("Review window exceeds the 30-day maximum (2592000 seconds).");
+    const meta = $("job-meta").value.trim();
+    const arbiter = addrInput("job-arbiter", true);
+    const receipt = await send("Create job", async () =>
+      escrow.createJob(agent, tokenAddress, amount, deadline, windowSecs, meta, arbiter));
+    if (receipt) {
+      const created = await read("Read new job id", async () => escrow.jobCount());
+      if (created !== null) {
+        const id = created - 1n;
+        $("job-id").value = String(id);
+        $("create-result").textContent = "Job created: ID " + id;
+        log("New job ID: " + id);
+        await loadJob();
+      }
+      await refreshBalances();
+    }
+  } catch (e) {
+    log("Create job — failed: " + fmtErr(e), null, false);
+  }
+};
+
+// ---- Job loading ----
+async function loadJob() {
+  try {
+    const id = jobId();
+    const [job, windows] = await Promise.all([
+      read("Load job", async () => escrow.getJob(id)),
+      read("Load job windows", async () => escrow.jobWindows(id))
+    ]);
+    if (!job) return;
+    $("job-table").style.display = "table";
+    $("j-state").textContent = STATES[Number(job.state)] + " (" + Number(job.state) + ")";
+    $("j-payer").textContent = job.payer;
+    $("j-agent").textContent = job.agent;
+    $("j-token").textContent = job.token;
+    $("j-amount").textContent = ethers.formatUnits(job.amount, tokenDecimals) + " (raw " + job.amount.toString() + ")";
+    $("j-deadline").textContent = fmtTs(job.deadline);
+    $("j-window").textContent = job.reviewWindow.toString() + " seconds";
+    $("j-hash").textContent = job.deliveryHash;
+    $("j-meta").textContent = job.metadataURI || "—";
+    $("j-delivered").textContent = fmtTs(job.deliveredAt);
+    $("j-arbiter").textContent = job.arbiter === ZERO ? "— (payer resolves)" : job.arbiter;
+    if (windows) {
+      $("j-claim").textContent = fmtTs(windows.agentClaimAt) + " (agent may claim strictly after this)";
+      $("j-timeout").textContent = fmtTs(windows.disputeTimeoutAt) + " (timeout settles strictly after this)";
+    }
+    const count = await read("Read job count", async () => escrow.jobCount());
+    if (count !== null) $("job-count").textContent = "Total jobs: " + count.toString();
+  } catch (e) {
+    log("Load job — failed: " + fmtErr(e), null, false);
+  }
+}
+$("btn-load").onclick = loadJob;
+$("btn-latest").onclick = async () => {
+  const count = await read("Read job count", async () => escrow.jobCount());
+  if (count !== null && count > 0n) { $("job-id").value = String(count - 1n); await loadJob(); }
+  else if (count !== null) log("No jobs exist yet.", null, false);
+};
+
+// ---- Actions ----
+$("btn-accept").onclick = async () => {
+  const r = await send("Accept job (agent)", async () => escrow.acceptJob(jobId(), addrInput("accept-arbiter", true)));
+  if (r) await loadJob();
+};
+$("btn-deliver").onclick = async () => {
+  try {
+    const text = $("delivery-text").value.trim();
+    if (!text) throw new Error("Enter delivery text or a raw 0x bytes32 hash.");
+    let hash;
+    if (/^0x[0-9a-fA-F]{64}$/.test(text)) hash = text;
+    else hash = ethers.keccak256(ethers.toUtf8Bytes(text));
+    const r = await send("Submit delivery (agent)", async () => escrow.submitDelivery(jobId(), hash));
+    if (r) await loadJob();
+  } catch (e) {
+    log("Submit delivery — failed: " + fmtErr(e), null, false);
+  }
+};
+$("btn-release").onclick = async () => { const r = await send("Release", async () => escrow.release(jobId())); if (r) await loadJob(); };
+$("btn-refund").onclick = async () => { const r = await send("Refund after deadline", async () => escrow.refundAfterDeadline(jobId())); if (r) await loadJob(); };
+$("btn-cancel").onclick = async () => { const r = await send("Cancel", async () => escrow.cancel(jobId())); if (r) await loadJob(); };
+$("btn-cancel-unacc").onclick = async () => { const r = await send("Cancel unaccepted", async () => escrow.cancelUnaccepted(jobId())); if (r) await loadJob(); };
+$("btn-dispute").onclick = async () => { const r = await send("Raise dispute", async () => escrow.raiseDispute(jobId())); if (r) await loadJob(); };
+$("btn-resolve").onclick = async () => {
+  const toAgent = $("resolve-choice").value === "true";
+  const r = await send("Resolve dispute (" + (toAgent ? "pay agent" : "refund payer") + ")", async () => escrow.resolveDispute(jobId(), toAgent));
+  if (r) await loadJob();
+};
+$("btn-timeout").onclick = async () => { const r = await send("Settle dispute timeout", async () => escrow.settleDisputeTimeout(jobId())); if (r) await loadJob(); };
+$("btn-withdraw").onclick = async () => { const r = await send("Withdraw credit", async () => escrow.withdraw(tokenAddress)); if (r) await refreshBalances(); };
+$("btn-withdraw-to").onclick = async () => {
+  const r = await send("Withdraw credit to address", async () => escrow.withdrawTo(tokenAddress, addrInput("withdraw-to", false)));
+  if (r) await refreshBalances();
+};
+
+// ---- Views ----
+$("btn-invariant").onclick = async () => {
+  const inv = await read("Settlement invariant", async () => escrow.settlementInvariant(tokenAddress));
+  if (!inv) return;
+  $("invariant-out").innerHTML =
+    "<p>Token: <span class='mono'>" + escapeHtml(tokenAddress) + "</span><br>" +
+    "Escrow balance: " + ethers.formatUnits(inv.balance, tokenDecimals) + "<br>" +
+    "Unsettled jobs sum: " + ethers.formatUnits(inv.unsettledSum, tokenDecimals) + "<br>" +
+    "Pending credits sum: " + ethers.formatUnits(inv.pendingCreditsSum, tokenDecimals) + "<br>" +
+    "Holds: <b class='" + (inv.holds ? "ok" : "bad") + "'>" + inv.holds + "</b>" +
+    (inv.holds ? "" : " — false in settled state means stray funds or a bug; false mid-call is one of the two documented transient windows (see THREAT_MODEL.md).") + "</p>";
+};
+$("btn-credit").onclick = async () => {
+  let who = $("credit-addr").value.trim();
+  if (who === "") who = account;
+  if (!who) { log("Check pull credit — connect your wallet first.", null, false); return; }
+  if (!ethers.isAddress(who)) { log("Check pull credit — invalid address.", null, false); return; }
+  const c = await read("Pull credit", async () => escrow.pendingCredit(tokenAddress, who));
+  if (c !== null) $("credit-out").textContent = "Pull credit for " + who + ": " + ethers.formatUnits(c, tokenDecimals) + " " + tokenSymbol;
+};
+</script>
+</body>
+</html>

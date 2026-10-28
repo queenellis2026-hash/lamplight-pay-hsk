@@ -12,13 +12,13 @@ Settlement.
 - Submission deadline Nov 1, 2026, 21:30 IST · Demo Day Nov 4 · Winners Nov 5.
 
 ## Deployment (HSKChain Testnet, chain ID 133)
-- [AgentEscrow `0xF1c84737AAc850546d84C54d60B3b18fF82F8afA`](https://testnet-explorer.hskchain.net/address/0xF1c84737AAc850546d84C54d60B3b18fF82F8afA) — deployed Oct 28, 2026 ~1:14 AM CDT ([tx](https://testnet-explorer.hskchain.net/tx/2ab7754a91670e4f21deef9280f6d3353803b7aee639f9114b78cb821ef94b12)), Blockscout-verified.
-- [MockUSDC `0x00835c4588461353B4B284437d7D65c466587375`](https://testnet-explorer.hskchain.net/address/0x00835c4588461353B4B284437d7D65c466587375) — deployed Oct 28, 2026 ~1:14 AM CDT ([tx](https://testnet-explorer.hskchain.net/tx/b0a3961840adfee33fe9352710ebac1e8e30c5467f8dc7c98c3696f8e95d913f)), Blockscout-verified.
-- Deployer: `0x995646c5270f26a8D64df58D7bc7e8277c606e27` (testnet-only, fresh key; funded 0.1 tHSK from the testnet faucet). Previous deployment (Oct 26, 2026): AgentEscrow `0x6Fa3d30F854aCBd589E10D78e9531fB910759eb7` ([tx](https://testnet-explorer.hskchain.net/tx/59069c0957ea521c47bbc79fc22d9f3de4df8916c611b4b8c4a41e28f4a74f7c)), MockUSDC `0x860CadF955CF73FDB8E9ED2979104baae9f833B9` ([tx](https://testnet-explorer.hskchain.net/tx/2ea7242b072fd7348b619f279e66a9c531792a4e99b8d835a8a073989191b4a7)), deployer `0xa67d284fC85345c2e3aCC3A34d46f93a295df341` — superseded by the Oct 28 redeploy.
-- Demo scenarios: 3/3 pass on a local EVM; `pytest` 71 passed. Receipts in `demo-receipts/`.
+- [AgentEscrow `0xAB70612F45d9cf914D129b0DB71DE243dD55813C`](https://testnet-explorer.hskchain.net/address/0xAB70612F45d9cf914D129b0DB71DE243dD55813C) — deployed Oct 28, 2026, round-19+20 code, block 35016779, Blockscout-verified (partial match).
+- [MockUSDC `0xEF346652eeB233662E7d290d222175895d53ef15`](https://testnet-explorer.hskchain.net/address/0xEF346652eeB233662E7d290d222175895d53ef15) — deployed Oct 28, 2026, block 35016778, Blockscout-verified (partial match).
+- Deployer: `0x995646c5270f26a8D64df58D7bc7e8277c606e27` (testnet-only, fresh key; funded 0.1 tHSK from the testnet faucet). Previous deployment (Oct 28, 2026 ~1:14 AM CDT, round-16 code): AgentEscrow `0xF1c84737AAc850546d84C54d60B3b18fF82F8afA` ([tx](https://testnet-explorer.hskchain.net/tx/2ab7754a91670e4f21deef9280f6d3353803b7aee639f9114b78cb821ef94b12)), MockUSDC `0x00835c4588461353B4B284437d7D65c466587375` ([tx](https://testnet-explorer.hskchain.net/tx/b0a3961840adfee33fe9352710ebac1e8e30c5467f8dc7c98c3696f8e95d913f)) — superseded by the round-19 redeploy. Earlier deployment (Oct 26, 2026): AgentEscrow `0x6Fa3d30F854aCBd589E10D78e9531fB910759eb7` ([tx](https://testnet-explorer.hskchain.net/tx/59069c0957ea521c47bbc79fc22d9f3de4df8916c611b4b8c4a41e28f4a74f7c)), MockUSDC `0x860CadF955CF73FDB8E9ED2979104baae9f833B9` ([tx](https://testnet-explorer.hskchain.net/tx/2ea7242b072fd7348b619f279e66a9c531792a4e99b8d835a8a073989191b4a7)), deployer `0xa67d284fC85345c2e3aCC3A34d46f93a295df341` — superseded by the Oct 28 redeploy.
+- Demo scenarios: 3/3 pass on a local EVM; `pytest` 85 passed (79 flow + 6 deploy-script). Live testnet demo on the round-19 contracts: flows A/B/C + stranger guards pass, escrow ends at 0. Receipts in `demo-receipts/`.
 - Demo video: v4, 2:05, Unlisted — https://youtu.be/6lGHXO1dEVM.
 - Submitted Oct 27, 2026: https://dorahacks.io/build/50417 — status Under Review. The Build can still be edited before judging. (Build edited Oct 28, 2026 with the new addresses + v4 video, verified live.)
-- Update (Oct 28, 2026): rounds 11–16 pushed Oct 28 ~01:09 AM CDT (head 6022bcb2); redeploy done Oct 28 ~1:14 AM CDT. The 'no push / PRE-fix deployment' notes in the round 11–15 sections below are superseded by that push.
+- Update (Oct 28, 2026): rounds 11–16 pushed Oct 28 ~01:09 AM CDT (head 6022bcb2); redeploy done Oct 28 ~1:14 AM CDT. The 'no push / PRE-fix deployment' notes in the round 11–15 sections below are superseded by that push. Rounds 17–21 + journey UI + threat model pushed Oct 28, 2026 (see Round-19 section at the end).
 
 ## Post-review fix (Oct 27, 2026)
 
@@ -138,14 +138,16 @@ no HSP code runs in this build yet.
 - Testnet-only. Rules: no mainnet deployment forfeits demo selection, and
   winners must be on mainnet to claim the prize. Mainnet deploy waits on
   funds; planned before demo selection Nov 3 if possible.
-- No escrow transaction has run against the deployed contracts yet — the demo
-  ran on a local EVM.
+- Live escrow transactions have run against the deployed round-19 contracts
+  (flows A/B/C + stranger guards, escrow ends at 0 — see Round-19 section
+  at the end). The v4 demo video still shows the round-16 addresses; a
+  fresh video on the round-19 deployment is owed.
 - No live HSP integration; no in-person Mumbai demo.
 
 ## Files
 
-- `README.md` · `SUBMISSION.md` · `STATUS.md` (this file)
-- `contracts/`, `a2a/`, `scripts/`, `tests/`, `build/`, `demo-receipts/`
+- `README.md` · `SUBMISSION.md` · `STATUS.md` (this file) · `THREAT_MODEL.md`
+- `contracts/`, `a2a/`, `scripts/`, `tests/`, `build/`, `demo-receipts/`, `app/` (live user journey UI)
 
 ## Round 4 — "make it better" — DONE Oct 27, 2026 (evening)
 
@@ -911,3 +913,68 @@ source change).
   2bf0f0d29624ab40dbbb3c23d3c65fc1. Verified: plays end to end, audio present
   in every section (mean -19 to -22 dB), guard + testnet frames viewed.
 - DONE Oct 28, 2026: uploaded to YouTube as Unlisted (@EllisLamplight) at https://youtu.be/6lGHXO1dEVM; Build 50417 edited. Do NOT make it Public.
+
+## Round-16 job-0 cleanup — DONE Oct 28, 2026 ~9:20 AM CDT
+- The round-16 live demo's job 0 (50 mUSDC) could not complete in-run
+  (stale-nonce deploy bug; the ephemeral agent key was lost when the
+  process aborted), so its funds stayed locked until the payer refunded
+  after the job's 3600s deadline.
+- Cleanup: `refundAfterDeadline(0)` from the payer, tx
+  0x0e5a8d52d9b94a0a4afaef493c90b1271ad4324fa761931290605ae98f66495b,
+  status 1, block 35005307. Job 0 now Refunded, escrow mUSDC balance 0,
+  payer 9,970 mUSDC (9,920 + 50 refunded). The round-16 demo's final
+  state is now exact.
+
+## Round-19 deployment + live demo + build pinning — DONE Oct 28, 2026
+- Fresh deploy on HSKChain Testnet (chain 133), round-19+20 code:
+  MockUSDC 0xEF346652eeB233662E7d290d222175895d53ef15 (block 35016778),
+  AgentEscrow 0xAB70612F45d9cf914D129b0DB71DE243dD55813C (block 35016779),
+  deployer 0x995646c5270f26a8D64df58D7bc7e8277c606e27. Record:
+  `build/hsk-testnet-deployment-round19.json`; the round-16 record is
+  untouched. Both contracts Blockscout-verified, "Partial Match",
+  solc v0.8.24, EVM Cancun, optimization off — AgentEscrow verified
+  Oct 28, 2026 15:51:56 (-05:00), MockUSDC 15:52:45 (-05:00). Partial
+  (not exact) is expected: the submitted AgentEscrow source carries
+  the round-20 comment-only note, which postdates the deployed
+  bytecode's metadata hash.
+- Live testnet demo against the new deployment (receipts in
+  `demo-receipts/*-testnet-round19.json`): Flow A release 50 mUSDC,
+  Flow B timeout refund 20 mUSDC, Flow C dispute resolved to agent
+  30 mUSDC, plus stranger release and stranger refund guards that
+  both reverted on "not payer" as required; guard jobs unwound.
+  Final state: jobCount 5, all terminal, escrow mUSDC exactly 0,
+  settlementInvariant (0, 0, 0, true), payer 9,920 / agent 80 mUSDC.
+  Deployer 0.058200 → 0.035388 tHSK.
+- Build pinning (round 21, read-only, no transactions): the deployed
+  AgentEscrow runtime code (22,748 bytes) is byte-identical to a
+  reproducible compile of the reviewed source once the metadata
+  trailer is accounted for (metadata-stripped sha256
+  368cb234ff6e4d2d6b5ba6e8d5450245d671e45b8829d82ca9b26f42e25cba0a;
+  full hashes differ ONLY in the 32-byte ipfs metadata hash).
+  MockUSDC matches fully (a263d4f9…) as the control case. Record:
+  `build/hsk-testnet-deployment-round19-pinning.json`. Conclusion:
+  the deployed build is pinned; no redeploy is needed to trust the
+  deployed code; any future source change must re-pin.
+- Round 21 (tests + docs only, no contract logic change): withdrawTo
+  hook test, failed-withdrawal atomicity test, partial-transfer
+  transient-window test, withdraw hook docstring correction, new
+  test-only `contracts/PartialHookToken.sol`, `scripts/compile.py`
+  updated. Full suite 85/85 (79 flow + 6 deploy-script).
+- Live user journey UI: `app/index.html` (single file, ethers via CDN,
+  no backend, no keys) — connect wallet, chain-133 guard, approve +
+  create/accept/deliver/release/refund/dispute/settle/withdraw, job
+  and invariant views, Blockscout links per transaction. Served via
+  GitHub Pages at
+  https://queenellis2026-hash.github.io/lamplight-pay-hsk/app/ .
+  Note: the deployed MockUSDC's mint is deployer-only, so a visitor
+  cannot mint mUSDC from the page; the UI says so and accepts a
+  custom token address.
+- Threat model: `THREAT_MODEL.md` — roles and trust, attack surface
+  with mitigations and pinning tests, the two transient windows
+  stated honestly, accepted limitations, evidence.
+- Reviews for this code: Claude round-17 SOUND (1 Low, docs only,
+  fixed in round 18); ChatGPT round-18 SOUND (2 Low, fixed in round
+  19); ChatGPT final-version review SOUND, no findings (testnet
+  only — mainnet readiness NOT established). Stateful/fuzz invariant
+  testing and a fresh demo video on the round-19 deployment are
+  still owed.

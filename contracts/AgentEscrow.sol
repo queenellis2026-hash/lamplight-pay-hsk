@@ -35,8 +35,8 @@ pragma solidity ^0.8.24;
 ///   - A disputed job must be resolved by the job's arbiter within the
 ///     dispute period (review window + DISPUTE_PERIOD, 7 days). After that,
 ///     either party may call settleDisputeTimeout(), which releases to the
-///     agent: delivered work gets paid unless the arbiter acts in time. No
-///     arbitrator in v1 — that is a stated limitation, not an oversight.
+///     agent: delivered work gets paid unless the job's arbiter (the payer
+///     when none is set) acts in time.
 /// @dev Funding measures what actually arrived: createJob compares the
 ///   escrow's token balance before and after transferFrom and stores the
 ///   received amount, so fee-on-transfer / rebasing tokens cannot make the
@@ -63,6 +63,18 @@ pragma solidity ^0.8.24;
 ///   a blocklisted address can never be pulled to itself, so withdrawTo()
 ///   is the only recovery path). Funding (createJob) still reverts on a
 ///   failed transferFrom — a job that was never funded must not exist.
+/// @dev Unsupported token classes (ROUND 19 checklist, Oct 28, 2026 —
+///   ChatGPT round-18 improvement 3; the scattered @dev notes below stay
+///   the detailed record, this is the one-place list):
+///   - Rebasing tokens: balances change outside transfers, breaking the
+///     received-amount and balance arithmetic createJob and the payout
+///     legs rely on.
+///   - Sender-side fee tokens: a transfer that debits the sender more
+///     than the amount asked strands a credit here — the withdraw ==
+///     check can never pass (see the ROUND 16 notes on withdraw()).
+///   - Partial-transfer tokens: payout arithmetic assumes a leg moves
+///     the full amount or nothing (see the payout @dev below); a token
+///     that moves part of the amount would need a different rule.
 /// @dev Minimal reentrancy guard included; no external dependencies.
 interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
@@ -89,9 +101,10 @@ contract AgentEscrow {
         // payer's and agent's own addresses (see createJob).
     }
 
-    /// @dev Dispute period after the review window ends: the payer must
-    ///   resolve a dispute within it; after it, settleDisputeTimeout()
-    ///   releases to the agent. 7 days, matching the Arc escrow's window.
+    /// @dev Dispute period after the review window ends: the job's arbiter
+    ///   (the payer when none is set) must resolve a dispute within it;
+    ///   after it, settleDisputeTimeout() releases to the agent. 7 days,
+    ///   matching the Arc escrow's window.
     uint256 public constant DISPUTE_PERIOD = 7 days;
 
     /// @dev Upper bound on the review window a payer may set in createJob.
@@ -122,6 +135,22 @@ contract AgentEscrow {
     ///   pull balance. ROUND 11 (Oct 27, 2026): Grok improvement 1
     ///   (round-10 review).
     mapping(address => uint256) public totalPendingCredits;
+
+    /// @dev Total of all unsettled job amounts per token, maintained
+    ///   in exactly two places: createJob adds the received amount
+    ///   when a job is funded, and every settlement path that moves a
+    ///   job to a terminal state (release, refundAfterDeadline,
+    ///   cancel, cancelUnaccepted, resolveDispute, settleDisputeTimeout)
+    ///   subtracts the job's amount. It exists so settlementInvariant
+    ///   is an O(1) read: without it the view must scan every job,
+    ///   which grows with history and prices on-chain callers out.
+    ///   ROUND 17 (Oct 28, 2026): Grok improvements 1 + 2 (round-16
+    ///   review) — the accumulator replaces the O(jobCount) scan.
+    ///   A drift would show at once: the invariant equation (balance
+    ///   == unsettled + credits) uses this total, so a missed add or
+    ///   subtract flips holds to false, and the tests cross-check the
+    ///   total against a manual scan after every settlement path.
+    mapping(address => uint256) public totalUnsettled;
 
     event JobCreated(uint256 indexed jobId, address indexed payer, address indexed agent, address token, uint256 amount, uint256 deadline, string metadataURI, address arbiter);
     event JobAccepted(uint256 indexed jobId, address indexed agent, address arbiter);
@@ -203,6 +232,7 @@ contract AgentEscrow {
             deliveredAt: 0,
             arbiter: arbiter
         });
+        totalUnsettled[token] += received;
         emit JobCreated(jobId, msg.sender, agent, token, received, block.timestamp + deadlineSeconds, metadataURI, arbiter);
     }
 
@@ -271,6 +301,7 @@ contract AgentEscrow {
             require(msg.sender == job.payer, "not payer");
         }
         job.state = State.Released;
+        totalUnsettled[job.token] -= job.amount;
         _payOrCredit(job.token, job.agent, job.amount);
         emit JobReleased(jobId, job.agent, job.amount);
     }
@@ -284,6 +315,7 @@ contract AgentEscrow {
         );
         require(block.timestamp > job.deadline, "deadline not passed");
         job.state = State.Refunded;
+        totalUnsettled[job.token] -= job.amount;
         _payOrCredit(job.token, job.payer, job.amount);
         emit JobRefunded(jobId, job.payer, job.amount);
     }
@@ -293,6 +325,7 @@ contract AgentEscrow {
         Job storage job = jobs[jobId];
         require(job.state == State.Created, "only before accept");
         job.state = State.Cancelled;
+        totalUnsettled[job.token] -= job.amount;
         _payOrCredit(job.token, job.payer, job.amount);
         emit JobCancelled(jobId);
     }
@@ -307,6 +340,7 @@ contract AgentEscrow {
         require(job.state == State.Created, "not created");
         require(block.timestamp > job.deadline, "deadline not passed");
         job.state = State.Cancelled;
+        totalUnsettled[job.token] -= job.amount;
         _payOrCredit(job.token, job.payer, job.amount);
         emit JobCancelledUnaccepted(jobId);
     }
@@ -341,6 +375,11 @@ contract AgentEscrow {
     ///   passing the arbiter it expected.
     ///   The arbiter resolves; it cannot raise a dispute (only the parties
     ///   may) and cannot release (only payer/agent may).
+    /// @dev The arbiter's ruling is binding, but the address checks cannot
+    ///   prove the arbiter is independent of the payer — the agent confirmed
+    ///   THAT address at acceptJob, not its independence (ROUND 18: ROUND 17
+    ///   said "advisory only" here, which was wrong — only the arbiter may
+    ///   call this function, and it moves funds either way, no appeal).
     /// @dev Must be called within the dispute period (review window +
     ///   DISPUTE_PERIOD after delivery); after that, settleDisputeTimeout()
     ///   is the only exit, so a dispute cannot lock funds forever — even
@@ -363,20 +402,23 @@ contract AgentEscrow {
         );
         if (releaseToAgent) {
             job.state = State.Released;
+            totalUnsettled[job.token] -= job.amount;
             _payOrCredit(job.token, job.agent, job.amount);
             emit JobReleased(jobId, job.agent, job.amount);
         } else {
             job.state = State.Refunded;
+            totalUnsettled[job.token] -= job.amount;
             _payOrCredit(job.token, job.payer, job.amount);
             emit JobRefunded(jobId, job.payer, job.amount);
         }
         emit DisputeResolved(jobId, releaseToAgent);
     }
 
-    /// @notice Exit for a dispute the payer raised and then abandoned: after
+    /// @notice Exit for a dispute a party raised and then abandoned: after
     ///   the dispute period ends, either party may settle it, releasing the
-    ///   funds to the agent. Delivered work gets paid unless the payer acts
-    ///   in time; a payer cannot dispute, go silent, and keep the money.
+    ///   funds to the agent. Delivered work gets paid unless the job's
+    ///   arbiter (the payer when none is set) acts in time; a party cannot
+    ///   raise a dispute, go silent, and keep the money.
     /// @dev Boundary semantics: the timeout is STRICT
     ///   (block.timestamp > deliveredAt + reviewWindow + DISPUTE_PERIOD).
     ///   At exactly the dispute-timeout second settleDisputeTimeout()
@@ -391,6 +433,7 @@ contract AgentEscrow {
             "dispute period not ended"
         );
         job.state = State.Released;
+        totalUnsettled[job.token] -= job.amount;
         _payOrCredit(job.token, job.agent, job.amount);
         emit JobReleased(jobId, job.agent, job.amount);
         emit DisputeResolved(jobId, true);
@@ -417,16 +460,25 @@ contract AgentEscrow {
     ///   strand the credit here (the revert preserves it, but the
     ///   credit could never be pulled); such a token would need the
     ///   >= treatment _payOrCredit uses.
+    /// @dev ROUND 19 (Oct 28, 2026): ChatGPT round-18 finding 1 — the
+    ///   credit total is subtracted BEFORE the transfer, not after:
+    ///   a recipient callback (ERC777/ERC1363-style hook) firing
+    ///   mid-transfer must see settlementInvariant hold, so the
+    ///   total must already reflect the withdrawal when the token
+    ///   moves. If the transfer fails the require(moved == amount)
+    ///   below reverts the whole call, restoring both the subtraction
+    ///   and the zeroed pull balance — the reorder changes only the
+    ///   mid-call ordering, never the final state.
     function withdraw(address token) external nonReentrant {
         uint256 amount = pendingWithdrawals[token][msg.sender];
         require(amount > 0, "nothing to withdraw");
         pendingWithdrawals[token][msg.sender] = 0;
+        totalPendingCredits[token] -= amount;
         uint256 balanceBefore = _balanceOf(token);
         _tryTransfer(token, msg.sender, amount);
         uint256 balanceAfter = _balanceOf(token);
         uint256 moved = balanceBefore > balanceAfter ? balanceBefore - balanceAfter : 0;
         require(moved == amount, "withdrawal failed");
-        totalPendingCredits[token] -= amount;
         emit Withdrawn(token, msg.sender, msg.sender, amount);
     }
 
@@ -441,17 +493,22 @@ contract AgentEscrow {
     /// @dev ROUND 16 (Oct 28, 2026): same == note as withdraw() — a
     ///   sender-side fee token would strand the credit here too and
     ///   would need the >= treatment _payOrCredit uses.
+    /// @dev ROUND 19 (Oct 28, 2026): same credit-total-before-transfer
+    ///   reorder as withdraw() — ChatGPT round-18 finding 1. A
+    ///   recipient callback mid-transfer must see the credit already
+    ///   subtracted; a failed transfer reverts the whole call and
+    ///   restores it.
     function withdrawTo(address token, address to) external nonReentrant {
         require(to != address(0), "zero address");
         uint256 amount = pendingWithdrawals[token][msg.sender];
         require(amount > 0, "nothing to withdraw");
         pendingWithdrawals[token][msg.sender] = 0;
+        totalPendingCredits[token] -= amount;
         uint256 balanceBefore = _balanceOf(token);
         _tryTransfer(token, to, amount);
         uint256 balanceAfter = _balanceOf(token);
         uint256 moved = balanceBefore > balanceAfter ? balanceBefore - balanceAfter : 0;
         require(moved == amount, "withdrawal failed");
-        totalPendingCredits[token] -= amount;
         emit Withdrawn(token, msg.sender, to, amount);
     }
 
@@ -712,36 +769,73 @@ contract AgentEscrow {
     ///   accounts that hold credits, so the total is the only way to
     ///   expose the sum on-chain. The balance is read with _balanceOf,
     ///   never a high-level call, so a dead token reads as 0 instead of
-    ///   reverting the view. This is a pure read (O(jobCount) over the
-    ///   job list); it costs nothing to call off-chain.
+    ///   reverting the view. This is a pure O(1) read (two mapping
+    ///   totals plus one balance): no scan, so the cost does not grow
+    ///   with job history and on-chain callers pay the same at 5 jobs
+    ///   as at 5,000 — the round-13 gas ceiling pins that flatness.
     /// @dev `holds` is false if anyone sent tokens to the escrow outside
     ///   createJob (a direct transfer the escrow never recorded) — the
     ///   view reports the truth, it does not hide stray funds.
     /// @dev ROUND 11 (Oct 27, 2026): Grok improvement 1 (round-10
     ///   review) — the equation the tests enforce is now callable.
     /// @dev ROUND 12 (Oct 27, 2026): Grok improvement 3 (round-11
-    ///   review) — the O(jobCount) scan is intentional: this view is
-    ///   for off-chain monitors and front-ends, where an eth_call
-    ///   costs nothing. An on-chain caller with a large history
-    ///   should prefer the per-token totals instead —
+    ///   review) — the O(jobCount) scan was intentional at the time:
+    ///   this view is for off-chain monitors and front-ends, where an
+    ///   eth_call costs nothing. An on-chain caller with a large
+    ///   history should prefer the per-token totals instead —
     ///   totalPendingCredits for the credit sum (an O(1) read) — and
     ///   call this view only when it needs the unsettled sum the scan
-    ///   computes.
+    ///   computes. ROUND 17 supersedes that advice: the view itself
+    ///   is now O(1) via totalUnsettled, so no caller needs the scan.
     /// @dev ROUND 13 (Oct 28, 2026): Grok improvements 2 + 3 (round-12
     ///   review) — a direct transfer of tokens into the escrow is the
     ///   only INTENDED way holds becomes false: no settlement path
     ///   creates or destroys funds, so a job settling never flips
     ///   holds on its own (the round-12 stray-funds test pins this).
     ///   Off-chain recipe for the unsettled sum alone, without the
-    ///   full scan: iterate jobIds 0..jobCount-1, call getJob(jid),
+    ///   view: iterate jobIds 0..jobCount-1, call getJob(jid),
     ///   and sum job.amount where job.token == token and job.state is
     ///   Created, Accepted, Delivered or Disputed (state <= Disputed);
     ///   the credit sum is totalPendingCredits[token], an O(1) read.
-    ///   That recipe computes exactly what this view computes.
+    ///   That recipe computes exactly what this view computes — the
+    ///   tests cross-check the view against it after every path.
     ///   ROUND 15: the 50-job gas figure pinned in the tests was
     ///   measured on eth-tester/PyEVM and will differ on a real
     ///   client; the ceiling remains the regression tripwire
     ///   regardless of absolute numbers.
+    /// @dev ROUND 17 (Oct 28, 2026): Grok improvements 1 + 2 (round-16
+    ///   review) — the unsettled sum is now the totalUnsettled
+    ///   accumulator, maintained in createJob and every settlement
+    ///   path (see its note). The scan is gone: the view reads two
+    ///   mapping totals and one balance, so its gas is flat in
+    ///   jobCount. The manual-scan recipe above is still the
+    ///   cross-check the tests use to prove the accumulator never
+    ///   drifts.
+    /// @dev ROUND 18 (Oct 28, 2026): Claude round-17 improvement 2 —
+    ///   reentrancy-window note, COMMENT ONLY: during createJob's
+    ///   transferFrom the escrow balance has already risen but
+    ///   totalUnsettled has not yet been updated, so a callback token
+    ///   reading this view mid-call sees holds == false. The view is
+    ///   deliberately not locked; the window has the same shape it had
+    ///   before round 17, it just matters more now that on-chain
+    ///   callers are encouraged to read the view.
+    /// @dev ROUND 19 (Oct 28, 2026): the withdraw window ChatGPT found
+    ///   in round 18 is CLOSED by this round's reorder — withdraw()
+    ///   and withdrawTo() now subtract totalPendingCredits BEFORE the
+    ///   transfer, so a recipient callback mid-withdrawal sees holds
+    ///   == true. Only the createJob window above remains open.
+    /// @dev ROUND 20 (Oct 28, 2026): correction to the round-19 note —
+    ///   the createJob window is NOT the only one still open. A second
+    ///   window of the same shape lives in _payOrCredit: every
+    ///   settlement path subtracts totalUnsettled BEFORE _payOrCredit,
+    ///   but the credit for a shortfall is added only AFTER the
+    ///   transfer attempt, so a callback token reading this view
+    ///   mid-call during a FAILED or PARTIAL payout sees holds ==
+    ///   false transiently. It self-heals when the call completes
+    ///   (the credit is added), and it takes an exotic token — a hook
+    ///   that then fails or partially pays — to observe at all. Both
+    ///   open windows are transient mid-call reads, never a settled
+    ///   break; the view is deliberately not locked.
     /// @param token The token to check.
     /// @return balance the escrow's actual balance of the token
     /// @return unsettledSum the sum of amounts of all unsettled jobs in the token
@@ -754,13 +848,7 @@ contract AgentEscrow {
         bool holds
     ) {
         balance = _balanceOf(token);
-        uint256 count = jobCount;
-        for (uint256 i = 0; i < count; i++) {
-            Job storage job = jobs[i];
-            if (job.token == token && job.state <= State.Disputed) {
-                unsettledSum += job.amount;
-            }
-        }
+        unsettledSum = totalUnsettled[token];
         pendingCreditsSum = totalPendingCredits[token];
         holds = balance == unsettledSum + pendingCreditsSum;
     }
