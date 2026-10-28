@@ -66,11 +66,11 @@ def main() -> None:
                       escrow=escrow.address, pay_to=agent)
     (out_dir / "quote-A.json").write_text(quote_json(quote))
     tx = escrow.functions.createJob(agent, musdc.address, 50 * ONE_MUSDC,
-                                    3600, 600, f"ipfs://quote/{quote['quote_id']}").transact({"from": payer})
+                                    3600, 600, f"ipfs://quote/{quote['quote_id']}", "0x0000000000000000000000000000000000000000").transact({"from": payer})
     rc = w3.eth.wait_for_transaction_receipt(tx)
     job_id = 0
     print(f"\n[A] job {job_id} funded, tx {rc.transactionHash.hex()}")
-    escrow.functions.acceptJob(job_id).transact({"from": agent})
+    escrow.functions.acceptJob(job_id, "0x0000000000000000000000000000000000000000").transact({"from": agent})
     dh = delivery_hash("audit report: top-20 holders, block 129454096")
     tx = escrow.functions.submitDelivery(job_id, dh).transact({"from": agent})
     w3.eth.wait_for_transaction_receipt(tx)
@@ -87,7 +87,7 @@ def main() -> None:
 
     # --- Scenario B: timeout refund ----------------------------------------------
     tx = escrow.functions.createJob(agent, musdc.address, 20 * ONE_MUSDC,
-                                    5, 0, "ipfs://quote/timeout-demo").transact({"from": payer})
+                                    5, 0, "ipfs://quote/timeout-demo", "0x0000000000000000000000000000000000000000").transact({"from": payer})
     w3.eth.wait_for_transaction_receipt(tx)
     job_b = 1
     print(f"\n[B] job {job_b} funded (20 mUSDC), agent never delivers")
@@ -106,10 +106,10 @@ def main() -> None:
 
     # --- Scenario C: dispute, resolved to agent ----------------------------------
     tx = escrow.functions.createJob(agent, musdc.address, 30 * ONE_MUSDC,
-                                    3600, 600, "ipfs://quote/dispute-demo").transact({"from": payer})
+                                    3600, 600, "ipfs://quote/dispute-demo", "0x0000000000000000000000000000000000000000").transact({"from": payer})
     w3.eth.wait_for_transaction_receipt(tx)
     job_c = 2
-    escrow.functions.acceptJob(job_c).transact({"from": agent})
+    escrow.functions.acceptJob(job_c, "0x0000000000000000000000000000000000000000").transact({"from": agent})
     dh_c = delivery_hash("audit report v2, disputed then accepted")
     escrow.functions.submitDelivery(job_c, dh_c).transact({"from": agent})
     escrow.functions.raiseDispute(job_c).transact({"from": payer})
@@ -125,11 +125,62 @@ def main() -> None:
     print(f"[C] dispute resolved TO AGENT, tx {rc.transactionHash.hex()}")
 
     # --- Guards: a stranger cannot release or refund ------------------------------
-    try:
-        escrow.functions.release(0).transact({"from": stranger})
-        print("\n[!] GUARD FAILED: stranger released job 0")
-    except Exception as e:
-        print(f"\n[guard] stranger release correctly reverted ({type(e).__name__})")
+    # ROUND 16 (Oct 28, 2026): the old guard called release(0) after
+    # scenario A had already released job 0, so it reverted on "not
+    # delivered" before the caller was ever checked — the printed
+    # "guard correctly reverted" would have appeared even if the caller
+    # check were deleted. Both guards below run against jobs where the
+    # ONLY thing that can revert is the caller check, and the revert
+    # reason is asserted, not just the fact of a revert. Both guard
+    # jobs are unwound afterwards (dispute resolved to the payer /
+    # payer refund), so the final balances are unchanged.
+    from eth_tester.exceptions import TransactionFailed as _TxFailed
+
+    def _expect_revert(fn, reason, label):
+        try:
+            fn()
+        except _TxFailed as e:
+            assert reason in str(e), f"{label}: reverted, but not on {reason!r}: {e}"
+            print(f"[guard] {label} correctly reverted on {reason!r}")
+            return
+        raise AssertionError(f"{label}: expected a revert on {reason!r}, but the call succeeded")
+
+    # Release guard: job 3 is live and Delivered, so a stranger's
+    # release can only fail on the caller check.
+    tx = escrow.functions.createJob(agent, musdc.address, 10 * ONE_MUSDC,
+                                    3600, 600, "ipfs://quote/guard-release", "0x0000000000000000000000000000000000000000").transact({"from": payer})
+    w3.eth.wait_for_transaction_receipt(tx)
+    job_g = 3
+    escrow.functions.acceptJob(job_g, "0x0000000000000000000000000000000000000000").transact({"from": agent})
+    escrow.functions.submitDelivery(job_g, delivery_hash("guard deliverable")).transact({"from": agent})
+    print(f"\n[guard] job {job_g} delivered (10 mUSDC) for the stranger-release check")
+    _expect_revert(
+        lambda: escrow.functions.release(job_g).transact({"from": stranger}),
+        "not payer", "stranger release of live Delivered job")
+
+    # Refund guard: job 4 is Created and past its deadline, so a
+    # stranger's refund can only fail on the caller check.
+    tx = escrow.functions.createJob(agent, musdc.address, 5 * ONE_MUSDC,
+                                    5, 0, "ipfs://quote/guard-refund", "0x0000000000000000000000000000000000000000").transact({"from": payer})
+    w3.eth.wait_for_transaction_receipt(tx)
+    job_r = 4
+    latest = w3.eth.get_block("latest")
+    tester.time_travel(latest.timestamp + 100)  # past job 4's 5s deadline
+    tester.mine_blocks(1)
+    print(f"[guard] job {job_r} created and past deadline (5 mUSDC) for the stranger-refund check")
+    _expect_revert(
+        lambda: escrow.functions.refundAfterDeadline(job_r).transact({"from": stranger}),
+        "not payer", "stranger refund of refundable job")
+
+    # Unwind both guard jobs so the final balances are unchanged:
+    # job 3 is disputed and resolved to the payer, job 4 is refunded
+    # by the payer. (Still inside job 3's 600s review window: only
+    # 100s have passed since its delivery.)
+    escrow.functions.raiseDispute(job_g).transact({"from": payer})
+    escrow.functions.resolveDispute(job_g, False).transact({"from": payer})
+    print("[guard] job 3 disputed and resolved to payer (10 mUSDC back)")
+    escrow.functions.refundAfterDeadline(job_r).transact({"from": payer})
+    print("[guard] job 4 refunded by payer (5 mUSDC back)")
 
     print(f"\nFinal balances (mUSDC): payer={musdc.functions.balanceOf(payer).call()/ONE_MUSDC} "
           f"agent={musdc.functions.balanceOf(agent).call()/ONE_MUSDC} "

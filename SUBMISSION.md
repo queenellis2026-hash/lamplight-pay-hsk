@@ -86,7 +86,10 @@ solcx (compilation). HSKChain Testnet (chain ID 133) for deployment.
 
 ## Honest limitations (stated in the submission, not hidden)
 
-- Disputes are resolved by the payer in this version; a production version
-  needs a third-party arbiter.
+- Disputes are resolved by the payer by default; since round 4 a job
+  may name an optional third-party arbiter, and since round 14 the
+  agent confirms that arbiter on-chain at acceptJob (the call reverts
+  on a mismatch). The arbiter check only compares addresses, so it
+  cannot prove the arbiter is an independent party.
 - MockUSDC is a test token, not real USDC.
 - No trading, no real funds, no KYC involved.

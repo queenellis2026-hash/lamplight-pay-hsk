@@ -11,9 +11,13 @@ pragma solidity ^0.8.24;
 /// arbiter address set at creation. The arbiter must be neither the payer
 /// nor the agent — but that check only compares addresses: it cannot
 /// prove the arbiter is an independent party, since the payer could set
-/// a second wallet they control. The agent should read the job's arbiter
-/// before accepting and only take jobs whose arbiter it trusts; making
-/// the agent confirm the arbiter is a v2 feature, not in this contract.
+/// a second wallet they control. The agent confirms the arbiter
+/// on-chain at acceptJob (ROUND 14, Oct 28, 2026): it must pass the
+/// arbiter it expects, and the call reverts on a mismatch, so a
+/// payer can no longer name an arbiter the agent never agreed to —
+/// acceptance is now an explicit confirmation of THAT arbiter,
+/// recorded in the JobAccepted event. The check still only compares
+/// addresses: it cannot prove the arbiter is an independent party.
 /// If the arbiter is set and goes silent, the dispute still times out to
 /// the agent via settleDisputeTimeout(), so no arbiter can lock funds
 /// forever either.
@@ -37,6 +41,16 @@ pragma solidity ^0.8.24;
 ///   escrow's token balance before and after transferFrom and stores the
 ///   received amount, so fee-on-transfer / rebasing tokens cannot make the
 ///   escrow insolvent by recording more than it holds.
+/// @dev Payouts assume a token moves the full amount or nothing:
+///   the round-10 balance check in _payOrCredit credits only the
+///   shortfall between the escrow's balance before and after a payout
+///   leg, so a token that moved a partial amount would be credited
+///   only the shortfall, never the full amount. That arithmetic is
+///   correct only if a payout either moves the full amount or moves
+///   nothing — true of every token in the suite and of standard
+///   ERC-20s, but a token with partial-transfer behaviour would need
+///   a different settlement rule. Stated here so no later reader
+///   assumes partial-transfer support.
 /// @dev All token moves use SafeERC20-style low-level calls that accept an
 ///   empty return value, so USDT-style tokens (no bool return) work.
 /// @dev Payouts are PULL on failure. release / refund / cancel / dispute
@@ -98,8 +112,19 @@ contract AgentEscrow {
     ///   job's token varies; a recipient may hold credits in several.
     mapping(address => mapping(address => uint256)) public pendingWithdrawals;
 
+    /// @dev Total of all pending credits per token, maintained in the
+    ///   same three places pendingWithdrawals is written (_payOrCredit
+    ///   adds the shortfall; withdraw / withdrawTo subtract the full
+    ///   credit on a successful payout). It exists so the settlement
+    ///   invariant is observable on-chain: a view cannot enumerate the
+    ///   accounts that hold credits, so without this total the equation
+    ///   could only be checked off-chain by summing every account's
+    ///   pull balance. ROUND 11 (Oct 27, 2026): Grok improvement 1
+    ///   (round-10 review).
+    mapping(address => uint256) public totalPendingCredits;
+
     event JobCreated(uint256 indexed jobId, address indexed payer, address indexed agent, address token, uint256 amount, uint256 deadline, string metadataURI, address arbiter);
-    event JobAccepted(uint256 indexed jobId, address indexed agent);
+    event JobAccepted(uint256 indexed jobId, address indexed agent, address arbiter);
     event DeliverySubmitted(uint256 indexed jobId, bytes32 deliveryHash);
     event JobReleased(uint256 indexed jobId, address indexed agent, uint256 amount);
     event JobRefunded(uint256 indexed jobId, address indexed payer, uint256 amount);
@@ -137,9 +162,10 @@ contract AgentEscrow {
     ///   disputes, as before. A set arbiter must be neither the payer nor
     ///   the agent — but that is only an address comparison, not a proof
     ///   of independence: the payer could name a second wallet they
-    ///   control. The agent should read the job's arbiter before
-    ///   accepting and only take jobs whose arbiter it trusts. Only the
-    ///   arbiter may resolve when one is set.
+    ///   control. The agent confirms the arbiter on-chain at acceptJob
+    ///   (ROUND 14): it passes the arbiter it expects and the call
+    ///   reverts on a mismatch, so acceptance is an explicit agreement
+    ///   to THAT arbiter. Only the arbiter may resolve when one is set.
     /// @param arbiter Optional dispute resolver (address(0) = payer).
     function createJob(
         address agent,
@@ -180,12 +206,34 @@ contract AgentEscrow {
         emit JobCreated(jobId, msg.sender, agent, token, received, block.timestamp + deadlineSeconds, metadataURI, arbiter);
     }
 
-    function acceptJob(uint256 jobId) external onlyAgent(jobId) {
+    /// @notice Accept a job — and confirm its arbiter on-chain.
+    /// @dev ROUND 14 (Oct 28, 2026): agent-side arbiter confirmation.
+    ///   The agent passes the arbiter it expects; the call reverts
+    ///   ("arbiter mismatch") when it differs from the job's recorded
+    ///   arbiter, so a payer cannot name an arbiter the agent never
+    ///   agreed to and the agent's acceptance is on-record as an
+    ///   explicit confirmation of THAT arbiter. Passing address(0)
+    ///   confirms payer-as-arbiter on a no-arbiter job — and reverts on
+    ///   a job that HAS an arbiter, exactly like any other mismatch.
+    ///   The confirmation is readable afterwards two ways: the job's
+    ///   recorded arbiter (getJob) never changes after creation — there
+    ///   is no function that mutates it — and the JobAccepted event
+    ///   carries the confirmed arbiter, so the agreement is auditable
+    ///   from the logs without a second storage field.
+    /// @dev Check order: onlyAgent, then state, then deadline, then
+    ///   the arbiter match. A caller who is not the agent reverts
+    ///   "not agent" even with the right arbiter; a wrong-state or
+    ///   past-deadline job reverts on those grounds before the
+    ///   mismatch is ever judged.
+    /// @param expectedArbiter The arbiter the agent is agreeing to
+    ///   (address(0) = the payer, on a no-arbiter job).
+    function acceptJob(uint256 jobId, address expectedArbiter) external onlyAgent(jobId) {
         Job storage job = jobs[jobId];
         require(job.state == State.Created, "not created");
         require(block.timestamp <= job.deadline, "deadline passed");
+        require(expectedArbiter == job.arbiter, "arbiter mismatch");
         job.state = State.Accepted;
-        emit JobAccepted(jobId, msg.sender);
+        emit JobAccepted(jobId, msg.sender, job.arbiter);
     }
 
     function submitDelivery(uint256 jobId, bytes32 deliveryHash) external onlyAgent(jobId) {
@@ -289,7 +337,8 @@ contract AgentEscrow {
     ///   arbiter address set at creation, or the payer when none was set
     ///   (the demo default — the payer-as-arbiter limitation, kept for
     ///   no-arbiter jobs). A set arbiter is not guaranteed independent (see
-    ///   createJob): the agent should have checked it before accepting.
+    ///   createJob): the agent confirmed it at acceptJob (ROUND 14) by
+    ///   passing the arbiter it expected.
     ///   The arbiter resolves; it cannot raise a dispute (only the parties
     ///   may) and cannot release (only payer/agent may).
     /// @dev Must be called within the dispute period (review window +
@@ -362,6 +411,12 @@ contract AgentEscrow {
     ///   token can never eat a credit. (A token that moves the funds
     ///   and then returns false still counts as paid — the funds left,
     ///   so no credit is owed.)
+    /// @dev ROUND 16 (Oct 28, 2026): the == is deliberate — no token
+    ///   in the suite debits the sender more than the amount it is
+    ///   asked to move, and a sender-side fee token that did would
+    ///   strand the credit here (the revert preserves it, but the
+    ///   credit could never be pulled); such a token would need the
+    ///   >= treatment _payOrCredit uses.
     function withdraw(address token) external nonReentrant {
         uint256 amount = pendingWithdrawals[token][msg.sender];
         require(amount > 0, "nothing to withdraw");
@@ -371,6 +426,7 @@ contract AgentEscrow {
         uint256 balanceAfter = _balanceOf(token);
         uint256 moved = balanceBefore > balanceAfter ? balanceBefore - balanceAfter : 0;
         require(moved == amount, "withdrawal failed");
+        totalPendingCredits[token] -= amount;
         emit Withdrawn(token, msg.sender, msg.sender, amount);
     }
 
@@ -382,6 +438,9 @@ contract AgentEscrow {
     /// @dev Same ROUND 10 balance verification as withdraw(): the
     ///   balance must drop by exactly `amount`, or the call reverts
     ///   and the credit is restored in full.
+    /// @dev ROUND 16 (Oct 28, 2026): same == note as withdraw() — a
+    ///   sender-side fee token would strand the credit here too and
+    ///   would need the >= treatment _payOrCredit uses.
     function withdrawTo(address token, address to) external nonReentrant {
         require(to != address(0), "zero address");
         uint256 amount = pendingWithdrawals[token][msg.sender];
@@ -392,6 +451,7 @@ contract AgentEscrow {
         uint256 balanceAfter = _balanceOf(token);
         uint256 moved = balanceBefore > balanceAfter ? balanceBefore - balanceAfter : 0;
         require(moved == amount, "withdrawal failed");
+        totalPendingCredits[token] -= amount;
         emit Withdrawn(token, msg.sender, to, amount);
     }
 
@@ -551,6 +611,7 @@ contract AgentEscrow {
         }
         uint256 shortfall = amount - moved;
         pendingWithdrawals[token][to] += shortfall;
+        totalPendingCredits[token] += shortfall;
         emit Credited(token, to, shortfall);
     }
 
@@ -637,6 +698,71 @@ contract AgentEscrow {
             disputeTimeoutAt = agentClaimAt + DISPUTE_PERIOD;
         }
         credit = pendingWithdrawals[job.token][job.agent];
+    }
+
+    /// @notice The settlement invariant for a token, observable on-chain:
+    ///   the escrow's actual balance, the sum of unsettled job amounts,
+    ///   and the sum of pending pull credits — plus whether the equation
+    ///   holds. External monitors and front-ends can call this instead
+    ///   of summing every account's pull balance from event logs.
+    /// @dev Unsettled means Created, Accepted, Delivered or Disputed;
+    ///   Released, Refunded and Cancelled jobs hold no funds. The
+    ///   credit sum comes from totalPendingCredits, maintained wherever
+    ///   pendingWithdrawals is written — a view cannot enumerate the
+    ///   accounts that hold credits, so the total is the only way to
+    ///   expose the sum on-chain. The balance is read with _balanceOf,
+    ///   never a high-level call, so a dead token reads as 0 instead of
+    ///   reverting the view. This is a pure read (O(jobCount) over the
+    ///   job list); it costs nothing to call off-chain.
+    /// @dev `holds` is false if anyone sent tokens to the escrow outside
+    ///   createJob (a direct transfer the escrow never recorded) — the
+    ///   view reports the truth, it does not hide stray funds.
+    /// @dev ROUND 11 (Oct 27, 2026): Grok improvement 1 (round-10
+    ///   review) — the equation the tests enforce is now callable.
+    /// @dev ROUND 12 (Oct 27, 2026): Grok improvement 3 (round-11
+    ///   review) — the O(jobCount) scan is intentional: this view is
+    ///   for off-chain monitors and front-ends, where an eth_call
+    ///   costs nothing. An on-chain caller with a large history
+    ///   should prefer the per-token totals instead —
+    ///   totalPendingCredits for the credit sum (an O(1) read) — and
+    ///   call this view only when it needs the unsettled sum the scan
+    ///   computes.
+    /// @dev ROUND 13 (Oct 28, 2026): Grok improvements 2 + 3 (round-12
+    ///   review) — a direct transfer of tokens into the escrow is the
+    ///   only INTENDED way holds becomes false: no settlement path
+    ///   creates or destroys funds, so a job settling never flips
+    ///   holds on its own (the round-12 stray-funds test pins this).
+    ///   Off-chain recipe for the unsettled sum alone, without the
+    ///   full scan: iterate jobIds 0..jobCount-1, call getJob(jid),
+    ///   and sum job.amount where job.token == token and job.state is
+    ///   Created, Accepted, Delivered or Disputed (state <= Disputed);
+    ///   the credit sum is totalPendingCredits[token], an O(1) read.
+    ///   That recipe computes exactly what this view computes.
+    ///   ROUND 15: the 50-job gas figure pinned in the tests was
+    ///   measured on eth-tester/PyEVM and will differ on a real
+    ///   client; the ceiling remains the regression tripwire
+    ///   regardless of absolute numbers.
+    /// @param token The token to check.
+    /// @return balance the escrow's actual balance of the token
+    /// @return unsettledSum the sum of amounts of all unsettled jobs in the token
+    /// @return pendingCreditsSum the sum of all pending pull credits in the token
+    /// @return holds true when balance == unsettledSum + pendingCreditsSum
+    function settlementInvariant(address token) external view returns (
+        uint256 balance,
+        uint256 unsettledSum,
+        uint256 pendingCreditsSum,
+        bool holds
+    ) {
+        balance = _balanceOf(token);
+        uint256 count = jobCount;
+        for (uint256 i = 0; i < count; i++) {
+            Job storage job = jobs[i];
+            if (job.token == token && job.state <= State.Disputed) {
+                unsettledSum += job.amount;
+            }
+        }
+        pendingCreditsSum = totalPendingCredits[token];
+        holds = balance == unsettledSum + pendingCreditsSum;
     }
 
     function getJob(uint256 jobId) external view returns (Job memory) {

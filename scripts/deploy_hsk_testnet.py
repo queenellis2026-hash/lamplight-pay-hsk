@@ -1,9 +1,11 @@
 """Deploy Lamplight Pay to HSKChain Testnet (chain ID 133).
 
-NOT RUN YET — blocked: the HSK testnet RPC (https://testnet.hsk.xyz) times out
-from this VM, and the faucet needs a browser + wallet interaction. Run this
-where the RPC is reachable, after funding the deployer with testnet HSK
-from the faucet (no real funds, testnet only).
+NOT RUN YET — blocked on faucet funding only: the HSK testnet RPC
+(https://testnet.hsk.xyz) was verified reachable from this VM on
+Oct 28, 2026 (eth_chainId returns 0x85 = 133), but the official
+faucet (https://faucet.hashkeychain.net/) requires a reCAPTCHA v2
+solve in a browser. Fund the fresh deployer from the faucet first
+(1 tHSK per 24h, no real funds, testnet only), then run this.
 
 Usage:
   export HSK_TESTNET_RPC=https://testnet.hsk.xyz

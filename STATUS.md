@@ -486,3 +486,354 @@ nice-to-have, not needed for the demo).
   withdraw helper (Grok's round-9 new-feature suggestions). No Build
   edit was made in this task.
 
+## Round 11 — Grok round-10 improvements — DONE Oct 27, 2026 (evening)
+
+- **On-chain invariant view (Grok improvement 1):** a new
+  `settlementInvariant(token)` view returns (balance, unsettledSum,
+  pendingCreditsSum, holds) — the balance equation the tests enforce,
+  callable by external monitors and front-ends without log scanning.
+  The credit sum comes from a new `totalPendingCredits` per-token
+  total, maintained in the same three places `pendingWithdrawals` is
+  written (`_payOrCredit` adds the shortfall; `withdraw` /
+  `withdrawTo` subtract the full credit on a successful payout) —
+  a view cannot enumerate the accounts that hold credits, so the
+  total is the only way to expose the sum on-chain. The balance is
+  read with `_balanceOf` (never reverts; a dead token reads as 0),
+  and `holds` is false if anyone sent tokens to the escrow outside
+  `createJob` — the view reports the truth, it does not hide stray
+  funds. Unsettled means Created, Accepted, Delivered or Disputed.
+- **Second cold-path gas pinning (Grok improvement 2):** a new test
+  measures a credited release for an agent+token that already holds
+  a non-zero pending credit (two credited releases in a row for the
+  same agent, MalformedReturnToken mode 0): the second release writes
+  two warm (non-zero -> non-zero) credit slots instead of two cold
+  ones — measured 67,784 gas vs 99,017 for the first (cold) release.
+  New named ceiling `GAS_CEILING_COLD_PRIOR_CREDIT` 140,000 (~2x
+  measured, the same headroom rule as GAS_CEILING_SMALL). The exact
+  credit-sum assertions in the test — not the ceiling — are what
+  catch a double-credit or under-credit (a second credit of anything
+  other than exactly 10 ONE breaks the sum at once); the ceiling is
+  the gross-regression tripwire, as with the other ceilings. Side
+  effect noted: the first credited release now costs ~99k gas, up
+  from ~73k — the per-token total is one more cold SSTORE on the
+  first credit — still well under GAS_CEILING_SMALL (150,000), so
+  the existing gas test passes unchanged.
+- **NatSpec assumption (Grok improvement 3):** the contract's
+  top-level NatSpec now states the exact assumption the shortfall
+  arithmetic relies on — "tokens move the full amount or nothing" —
+  so no later reader assumes partial-transfer support. No behaviour
+  change.
+- **Tests: 60 passed, 0 failed** (56 before + 4 new: view matches
+  manual sums, view on a never-seen token returns zeros, view tracks
+  the equation through every demo scenario, warm-credit gas pinning).
+  Demo re-run: 3/3 scenarios + stranger guard pass, final balances
+  unchanged (payer 9920 / agent 80 / escrow 0) — receipts B and C
+  byte-identical to the pre-round-11 run (receipt A differs only by
+  its fresh quote, as always). The v3 video is therefore NOT visibly
+  stale. Build artifacts recompiled (`scripts/compile.py`);
+  AgentEscrow bytecode 21,560 B (was 20,778 B after round 10 — the
+  view + per-token total add 782 B).
+- NOT done here: no push (round 11 pushes only after its own Grok
+  re-review). The testnet deployment is still the PRE-fix contract
+  (now eleven fix rounds behind source) — redeploy + Build edit are
+  separate steps. Held, per instruction: agent-side arbiter
+  confirmation at acceptJob (Grok's round-10 feature — changes the
+  accept flow) and the `jobsOf(address party)` view (front-end
+  convenience, not needed for the demo). No Build edit was made in
+  this task.
+
+## Round 12 — Grok round-11 improvements — DONE Oct 27, 2026 (night)
+
+- **Stray-funds test (Grok improvement 2):** a new test proves
+  `settlementInvariant(token)` reports stray funds honestly — a
+  direct ERC-20 transfer into the escrow, outside `createJob`,
+  makes `holds` false while balance / unsettledSum /
+  pendingCreditsSum stay exactly correct (balance == unsettledSum
+  + pendingCreditsSum + stray, cross-checked against the manual
+  off-chain sums). It runs on a FRESH MockUSDC deployed inside
+  the test, so the stray amount never touches the shared fixture
+  and no later test inherits it. After the job settles cleanly,
+  `holds` stays false while the stray is still there — the stray
+  is not a job's money, so no settlement can make the equation
+  hold again. No behaviour gap was exposed: the view was already
+  correct; the test pins it.
+- **NatSpec note (Grok improvement 3):** the `settlementInvariant`
+  NatSpec now states the O(jobCount) scan is intentional — the view
+  is for off-chain monitors and front-ends, where an eth_call costs
+  nothing — and that an on-chain caller with a large history should
+  prefer the per-token totals (`totalPendingCredits` for the credit
+  sum, an O(1) read) and call the view only when it needs the
+  unsettled sum the scan computes. Comment only, no behaviour
+  change — the contract bytecode is unchanged.
+- **Tests: 61 passed, 0 failed** (60 before + 1 new: the
+  stray-funds test). Demo re-run: 3/3 scenarios + stranger guard
+  pass, final balances unchanged (payer 9920 / agent 80 / escrow 0)
+  — the demo output shape is unchanged, so the v3 video is NOT
+  visibly stale. No recompile needed (NatSpec only); build
+  artifacts untouched.
+- NOT done here: no push (round 12 pushes only after its own Grok
+  re-review). The testnet deployment is still the PRE-fix contract
+  (now twelve fix rounds behind source) — redeploy + Build edit are
+  separate steps. Held, per instruction: the running
+  `totalUnsettled[token]` total (would make the view O(1)) and
+  maxJobs / cursor-based pagination on `settlementInvariant`.
+
+## Round 13 — Grok round-12 improvements — DONE Oct 28, 2026 (night)
+
+- **Gas pinning on the view (Grok improvement 2):** a new test pins
+  `settlementInvariant(token)` gas under a realistic load — 50 jobs
+  on a fresh escrow + fresh token deployed inside the test, so the
+  load is exactly 50 regardless of test order and the ambient
+  fixture is untouched. Measured on this toolchain
+  (eth-tester/PyEVM, Oct 28, 2026): **387,382 gas** via
+  eth_estimateGas (includes its 21,000 intrinsic base, so the pure
+  view cost is ~366,000; marginal cost ~7,000 gas per job),
+  pinned under the new named constant
+  `GAS_CEILING_INVARIANT_VIEW = 800_000` (~2x measured, the same
+  headroom rule as GAS_CEILING_SMALL). The ceiling is a regression
+  tripwire for on-chain callers, not a hard limit: off-chain
+  monitors read the view via eth_call, which has no block gas limit
+  in practice. Tripwire proven real: the test FAILS with the ceiling
+  temporarily lowered to 300,000 (below the measured value) and
+  passes again at 800,000 (constant restored). The view is still
+  exactly right at load: 50 unsettled jobs of 10 ONE, no credits,
+  holds True.
+- **NatSpec note (Grok improvement 3):** the `settlementInvariant`
+  NatSpec now states a direct transfer of tokens into the escrow is
+  the only INTENDED way `holds` becomes false — no settlement path
+  creates or destroys funds, so a job settling never flips `holds`
+  on its own (the round-12 stray-funds test pins this). Comment
+  only, no behaviour change.
+- **Off-chain recipe (Grok improvement 1, doc half):** the NatSpec
+  and README now document the recipe for the unsettled sum alone,
+  without the full scan: iterate jobIds 0..jobCount-1, call
+  getJob(jid), sum job.amount where job.token == token and
+  job.state is Created, Accepted, Delivered or Disputed
+  (state <= Disputed); the credit sum is
+  totalPendingCredits[token], an O(1) read. The recipe computes
+  exactly what the view computes. The on-chain helper stays held —
+  no caller needs it yet.
+- **Tests: 62 passed, 0 failed** (61 before + 1 new: the
+  view-gas pinning test). Demo re-run: 3/3 scenarios + stranger
+  guard pass, final balances unchanged (payer 9920 / agent 80 /
+  escrow 0) — the demo output shape is unchanged, so the v3 video
+  is NOT visibly stale. No recompile needed (NatSpec + tests only);
+  build artifacts untouched.
+- NOT done here: no push (round 13 pushes only after its own Grok
+  re-review). The testnet deployment is still the PRE-fix contract
+  (now thirteen fix rounds behind source) — redeploy + Build edit
+  are separate steps. Held, per instruction: the on-chain
+  unsettled-sum helper; per-job "release-to" address;
+  batchWithdraw(token, accounts[]).
+
+
+## Round 14 — agent-side arbiter confirmation — DONE Oct 28, 2026 (night)
+
+The feature held since round 9 (Grok's round-9 feature, the one Ellis
+kept calling the better of the pair) and re-held in rounds 10 and
+11 — built now as the substantive feature, not the easy one.
+
+- **The problem it closes:** the payer named the arbiter at createJob
+  and the agent's acceptJob implicitly accepted it — the agent never
+  explicitly confirmed THAT arbiter, so a payer could name an arbiter
+  the agent never agreed to and the acceptance was on-record as
+  nothing more than "I accept the job".
+- **The fix:** `acceptJob(uint256 jobId, address expectedArbiter)`.
+  The agent passes the arbiter it expects; the call reverts
+  ("arbiter mismatch") when it differs from the job's recorded
+  arbiter. Passing address(0) confirms payer-as-arbiter on a
+  no-arbiter job — and reverts on a job that HAS an arbiter, exactly
+  like any other mismatch (address(0) is not a wildcard). Check
+  order: onlyAgent, then state, then deadline, then the arbiter
+  match — a non-agent reverts "not agent" even with the right
+  arbiter, and a wrong-state or past-deadline job reverts on those
+  grounds before the mismatch is judged.
+- **The confirmation is readable afterwards two ways:** the job's
+  recorded arbiter never changes after creation — there is no
+  function that mutates it — and the JobAccepted event now carries
+  the confirmed arbiter (`JobAccepted(jobId, agent, arbiter)`), so
+  the agreement is auditable from the logs without a second storage
+  field. No new storage was added.
+- **Migrations (signature change, not behaviour change):** every
+  acceptJob caller updated — `_make_delivered` now passes
+  `arbiter or ZERO` (the arbiter the job was created with), the
+  seven other direct test calls pass ZERO (all no-arbiter jobs),
+  the demo's two calls pass ZERO, and the HookToken hook helper now
+  encodes `acceptJob(uint256,address)` (the hook still fails on
+  onlyAgent before the arbiter check is reached). `a2a/quote.py`
+  and `a2a/receipt.py` do not reference acceptJob and were untouched.
+- **Docs:** contract NatSpec (header, createJob, resolveDispute),
+  README (arbiter paragraphs + test list + counts + bytecode),
+  SUBMISSION.md (the "Honest limitations" line now states the
+  payer-by-default / optional-arbiter / agent-confirmed reality
+  instead of "needs a third-party arbiter"). The round-6/10/11
+  STATUS.md "held" lines are dated historical records and were
+  left as written.
+- **Tests: 68 passed, 0 failed** (62 before + 6 new: mismatch
+  reverts; correct arbiter succeeds and the event carries it;
+  address(0) confirms payer-as-arbiter; address(0) reverts when an
+  arbiter is set; the recorded arbiter cannot change after accept,
+  with check order pinned; a non-agent reverts even with the right
+  arbiter). Demo re-run: 3/3 scenarios + stranger guard pass,
+  final balances unchanged (payer 9920 / agent 80 / escrow 0) — the
+  demo output shape is unchanged, so the v3 video is NOT visibly
+  stale. AgentEscrow bytecode 21,918 B (was 21,560 B).
+- NOT done here: no push (round 14 pushes only after its own Grok
+  re-review). The testnet deployment is still the PRE-fix contract
+  (now fourteen fix rounds behind source) — redeploy + Build edit
+  are separate steps. Held, per instruction: per-job "release-to"
+  address; batchWithdraw(token, accounts[]); the on-chain
+  unsettled-sum helper; totalUnsettled[token]; maxJobs / cursor
+  pagination on settlementInvariant.
+
+## Round 15 — final polish (Grok round-13 + round-14 improvements) — DONE Oct 28, 2026 (night)
+
+The five small items Ellis wanted built before final — the two
+round-13 polish items plus the three round-14 review improvements.
+No new feature; everything else stays held.
+
+- **Second gas measurement on the view (Grok round-13 improvement
+  1):** the same 50-job measurement with a NON-ZERO prior credit
+  total, so the view's credit-sum path is exercised under load, not
+  only the pure-unsettled path. A second fresh escrow + fresh
+  MalformedReturnToken: one job funded/delivered in mode 3 then
+  released in mode 0 (payout returns garbage, so the full 10 ONE
+  is credited), then 50 unsettled jobs in the same token. The view
+  is exactly [510, 500, 10, True] and its gas is 387,382 — identical
+  to the pure-unsettled measurement, as expected, since the credit
+  sum is a single SLOAD whose stored value does not change its cost.
+  Same ceiling GAS_CEILING_INVARIANT_VIEW 800,000. Tripwire proven
+  real: the test FAILS with the ceiling lowered to 300,000 and
+  passes again at 800,000 (constant restored).
+- **NatSpec note (Grok round-13 improvement 3):** settlementInvariant
+  now states the 50-job gas figure was measured on eth-tester/PyEVM
+  and will differ on a real client; the ceiling remains the
+  regression tripwire regardless of absolute numbers. Comment only;
+  no behaviour change.
+- **Check-order test (Grok round-14 improvement 1):** a non-agent
+  calling acceptJob with a DELIBERATELY WRONG arbiter still reverts
+  only on "not agent" — the mismatch is never judged before the
+  caller is. Locks the check-order claim forever, alongside the
+  round-14 right-arbiter variant.
+- **Auditability documentation (Grok round-14 improvement 2, doc
+  half only):** the README now says once how an integrator reads the
+  confirmed arbiter — `getJob(jobId)` (the Job's `arbiter` field,
+  never mutated after creation) or the `JobAccepted(jobId, agent,
+  arbiter)` event. No dedicated view built (held — getJob plus the
+  event already answer the question).
+- **acceptJob gas pinning (Grok round-14 improvement 3):** a
+  successful acceptJob with an arbiter match is pinned under the new
+  named constant GAS_CEILING_ACCEPT_JOB = 110,000. Measured on this
+  toolchain (eth-tester/PyEVM, Oct 28, 2026): 53,521 gas (53,509 on
+  a second run — 12 gas of run-to-run variance, far inside the
+  ceiling). Tripwire proven real: the test FAILS with the ceiling
+  lowered to 50,000 and passes again at 110,000 (constant restored).
+- **Tests: 70 passed, 0 failed** (68 before + 2 new: the wrong-
+  arbiter check-order test; the acceptJob gas pinning test). Demo
+  re-run: 3/3 scenarios + stranger guard pass, final balances
+  unchanged (payer 9920 / agent 80 / escrow 0) — the demo output
+  shape is unchanged, so the v3 video is NOT visibly stale.
+- NOT done here: no push (round 15 pushes only after its own Grok
+  re-review). The testnet deployment is still the PRE-fix contract
+  (now fifteen fix rounds behind source) — redeploy + Build edit
+  are separate steps. Held, per instruction: dedicated
+  confirmed-arbiter view; on-chain unsettled-sum helper; per-job
+  "release-to" address; batchWithdraw(token, accounts[]);
+  totalUnsettled[token]; maxJobs / cursor pagination on
+  settlementInvariant.
+
+## Round 16 — Claude final-gate fixes — DONE Oct 28, 2026 (night)
+
+Claude passed the round-15 deploy candidate as SOUND ("I'd ship it
+as the deploy candidate", Oct 28, 2026 ~12:44 AM CDT) with one Low
+finding and three improvements. Round 16 builds the three fixes
+Claude asked for; it SUPERSEDES the queued HSK round-15 Grok
+re-review (Grok reviews round 16 directly). No contract logic
+change — the compiled code is byte-identical to the round-15 code
+Claude passed (verified: same code-only md5, same 21,919 B total;
+only the metadata trailer differs, as it must for a comment-only
+source change).
+
+- **Demo guard fix (Claude finding 1, Low):** the old guard called
+  release(0) as the stranger after scenario A had already released
+  job 0, so it reverted on "not delivered" before the caller was
+  ever checked — the printed "guard correctly reverted" would have
+  appeared even if the caller check were deleted, and it never tried
+  a stranger refund though the comment said it did. The guard now
+  runs against live jobs and asserts the revert reason: job 3 is
+  funded/accepted/delivered (10 mUSDC) and a stranger's release must
+  revert on "not payer"; job 4 is Created and past its 5s deadline
+  (5 mUSDC) and a stranger's refundAfterDeadline must revert on
+  "not payer". Both guard jobs are unwound afterwards (job 3
+  disputed and resolved to the payer, job 4 refunded by the payer),
+  so the final balances are unchanged (payer 9920 / agent 80 /
+  escrow 0) and the three scenarios print exactly as before — only
+  the guard block's honesty changed, so the v3 video is NOT visibly
+  stale.
+- **Randomized state-machine test (Claude improvement 2):** one new
+  test, fixed seed 20261028, 60 steps on a FRESH escrow + fresh
+  MockUSDC / FeeToken / MalformedReturnToken. Each step picks a
+  lifecycle call at random (create, accept, deliver, release,
+  dispute, resolve, settleDisputeTimeout, refund, cancel,
+  cancelUnaccepted, withdraw, malformed-mode switch, time travel)
+  and asserts settlementInvariant(token).holds for all three tokens
+  after every step, success or revert. Measured: 25 succeeded, 35
+  reverted; the test requires at least 12 successes (roughly half
+  the measured count), so a future change that halves the reachable
+  transitions fails it. Malformed modes 4 (return-bomb, ~17.5M gas)
+  and 5 (gas-burning loop) are excluded for runtime. Ends with the
+  manual balance == unsettled + credits cross-check for the three
+  tokens. No invariant violation found — the strongest claim in the
+  design held over sequences nobody hand-wrote.
+- **Withdraw == comment (Claude improvement 3, cheap half):** a
+  comment at withdraw and withdrawTo stating why the strict == is
+  kept instead of the >= that _payOrCredit uses: no token in the
+  suite debits the sender more than the amount asked, and a
+  sender-side fee token that did would strand the credit here (the
+  revert preserves it, but the credit could never be pulled) and
+  would need the >= treatment. The == is NOT changed to >= (held —
+  contrived case, no token does it).
+- **Tests: 71 passed, 0 failed** (70 before + 1 new: the randomized
+  state-machine test, 12.67s on its own; full suite 165.03s). Demo
+  re-run: 3/3 scenarios + both guards pass, final balances
+  unchanged (payer 9920 / agent 80 / escrow 0).
+- NOT done here: no push (round 16 pushes only after its own Grok
+  re-review). The testnet deployment is still the PRE-fix contract
+  (now sixteen fix rounds behind source) — redeploy + Build edit
+  are separate steps. Held, per instruction: on-chain quote binding
+  (quoteHash in createJob + JobCreated event) — changes the contract
+  days before the Nov 1 deadline for quote provenance the demo scope
+  doesn't need; the receipt already carries the quote id. (Older
+  holds stand: dedicated confirmed-arbiter view; on-chain
+  unsettled-sum helper; per-job "release-to" address;
+  batchWithdraw(token, accounts[]); totalUnsettled[token]; maxJobs /
+  cursor pagination on settlementInvariant.)
+
+## Redeploy attempt — Oct 28, 2026 (night) — BLOCKED on faucet funding
+- Goal: redeploy MockUSDC + AgentEscrow (round-16 code) to HSK testnet
+  (chain 133) so the on-chain code matches the reviewed source; the
+  deployed contracts (MockUSDC 0x860CadF955CF73FDB8E9ED2979104baae9f833B9,
+  AgentEscrow 0x6Fa3d30F854aCBd589E10D78e9531fB910759eb7) are 16 rounds
+  behind source. Testnet only — never mainnet (177).
+- Verified ready: RPC https://testnet.hsk.xyz reachable from the VM
+  (eth_chainId 0x85 = 133, gas price ~1 gwei, chain live at block
+  ~0x215e94f). Artifacts recompiled from round-16 source (AgentEscrow
+  21,919 B, matches the round-16 figure). Deploy script needs no code
+  changes — only its header comment was corrected (RPC no longer
+  times out).
+- Fresh deployer generated: 0x995646c5270f26a8D64df58D7bc7e8277c606e27.
+  Key at ~/.hsk-testnet-deployer (mode 0600, testnet-only). NEVER the
+  Ellis main wallet key. The OLD deployer
+  (0xa67d284fC85345c2e3aCC3A34d46f93a295df341) still holds 0.0962 tHSK
+  but is NOT to be reused — the redeploy uses the fresh key only.
+  Expected deploy cost ~0.004 tHSK (the first deploy spent ~0.0038).
+- BLOCKER: the official faucet (https://faucet.hashkeychain.net/,
+  1 tHSK per 24h) requires a reCAPTCHA v2 solve in a browser — its
+  drip API takes {token, address} and the token can only come from
+  the captcha widget. The thirdweb faucet (0.01 tHSK/day) also needs
+  a browser wallet interaction. No API-only faucet route exists.
+  Next step: claim 1 tHSK for the fresh deployer address in a browser,
+  then run: DEPLOYER_KEY=$(cat ~/.hsk-testnet-deployer) .venv/bin/python
+  scripts/deploy_hsk_testnet.py — it writes
+  build/hsk-testnet-deployment.json and the new addresses go here.
+  Do NOT edit DoraHacks Build 50417 until the redeploy is done.

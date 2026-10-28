@@ -32,8 +32,10 @@ Lamplight Pay is a minimal, auditable settlement layer for agent-to-agent work:
    arbiter address set at creation. Note: the contract only checks the
    arbiter is neither the payer nor the agent — that does not prove it
    is an independent party, since the payer could name a second wallet
-   they control. The agent should read the job's arbiter before
-   accepting and only take jobs whose arbiter it trusts.
+   they control. Since round 14 (Oct 28, 2026) the agent confirms the
+   arbiter on-chain at acceptJob: it passes the arbiter it expects and
+   the call reverts on a mismatch, so acceptance is an explicit
+   agreement to THAT arbiter.
 5. **Receipt (off-chain).** Both sides keep a hash-stable settlement receipt:
    who paid whom, how much, for what, on which chain, with the tx hash as proof.
 
@@ -95,7 +97,7 @@ scripts/
   demo.py               3 end-to-end scenarios on a local EVM, writes receipts
   deploy_hsk_testnet.py deploy to HSK testnet (chain 133) — see below
 tests/
-  test_flow.py          56 tests: happy path, timeout refund, stranger guard,
+  test_flow.py          71 tests: happy path, timeout refund, stranger guard,
                     quote, review-window lifecycle, review-window cap (30
                     days) + boundary, fee/no-bool tokens,
                     cancelUnaccepted, mint access control, blocklisted
@@ -114,9 +116,14 @@ tests/
                     cross-function
                     reentrancy (hook calling raiseDispute / acceptJob),
                     zero-address agent guard, claimWindows (0, 0) before
-                    delivery, the jobWindows combined view, and the
+                    delivery, the jobWindows combined view, the
                     settlement invariant (escrow balance == unsettled
-                    jobs + pending credits)
+                    jobs + pending credits), and the on-chain
+                    settlementInvariant view (same equation, callable
+                    by monitors) plus a second cold-path gas pinning
+                    under a non-zero prior credit, and agent-side
+                    arbiter confirmation at acceptJob (mismatch reverts,
+                    JobAccepted carries the confirmed arbiter)
 demo-receipts/          quote + receipts produced by the demo run
 ```
 
@@ -124,9 +131,9 @@ demo-receipts/          quote + receipts produced by the demo run
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install web3 eth-tester py-solc-x py-evm pytest
-.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 19,746 B
+.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 21,918 B
 .venv/bin/python scripts/demo.py      # 3 scenarios, all pass
-.venv/bin/python -m pytest tests/ -v  # 56 passed
+.venv/bin/python -m pytest tests/ -v  # 70 passed
 ```
 
 Demo result (local EVM, real tx hashes in `demo-receipts/`):
@@ -171,9 +178,17 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   the dispute still times out to the agent, so no arbiter can lock funds
   forever. **Caveat (round 6): "third party" is not guaranteed** — the
   check only compares addresses, so the payer could name a second wallet
-  they control. The agent should read the job's arbiter before accepting
-  and only take jobs whose arbiter it trusts; making the agent confirm
-  the arbiter is a v2 feature.
+  they control. Since round 14 (Oct 28, 2026) the agent confirms the
+  arbiter on-chain at acceptJob: it passes the arbiter it expects and
+  the call reverts ("arbiter mismatch") on a mismatch, and the
+  JobAccepted event records the confirmed arbiter — so a payer can no
+  longer name an arbiter the agent never agreed to. **How an
+  integrator reads the confirmed arbiter (round 15):** call
+  `getJob(jobId)` — the returned Job carries the arbiter in its
+  `arbiter` field, which no function mutates after creation — or read
+  the `JobAccepted(jobId, agent, arbiter)` event from the logs. No
+  dedicated view exists on purpose: getJob plus the event already
+  answer the question.
 - **Review window (fixed Oct 27, 2026 after independent review).** Three
   reviewers (Claude, Grok, ChatGPT) all found the same gap: `reviewWindow`
   was stored but never enforced, so a silent payer could lock funds forever
@@ -237,11 +252,55 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   (19,900,000; re-measured 19,697,418), and the exact boundary
   semantics (strict > vs inclusive <=) are documented in the NatSpec
   of release / raiseDispute / resolveDispute / settleDisputeTimeout.)
+  (Round 11: a `settlementInvariant(token)` view returns (balance,
+  unsettledSum, pendingCreditsSum, holds) so monitors can call the
+  balance equation on-chain instead of summing pull balances from
+  logs — backed by a new `totalPendingCredits` per-token total,
+  maintained wherever `pendingWithdrawals` is written; the
+  "tokens move the full amount or nothing" assumption the
+  shortfall arithmetic relies on is now stated in the contract's
+  top-level NatSpec; and a second cold-path gas pinning under a
+  non-zero prior credit (measured 67,784, ceiling
+  GAS_CEILING_COLD_PRIOR_CREDIT 140,000) catches a future
+  double-credit by its exact credit-sum assertions. The first
+  credited release now costs ~99k gas (one more cold SSTORE for
+  the per-token total), still well under GAS_CEILING_SMALL.)
+  (Round 12: a stray-funds test pins that a direct ERC-20 transfer
+  into the escrow — outside createJob — makes `holds` false while
+  the other three view values stay exactly correct, and the
+  NatSpec now states the O(jobCount) scan is intentional for
+  off-chain monitors.) (Round 13: the view's gas is pinned under a
+  realistic load — 50 jobs, measured 387,382 gas via
+  eth_estimateGas, ceiling GAS_CEILING_INVARIANT_VIEW 800,000 — so
+  a future compiler or storage-layout change that turns the view
+  expensive is caught; the NatSpec now notes a direct transfer is
+  the only intended way `holds` becomes false, and the off-chain
+  recipe for the unsettled sum alone is documented.) (Round 14:
+  agent-side arbiter confirmation at acceptJob — the agent passes
+  the arbiter it expects, the call reverts "arbiter mismatch" on a
+  mismatch, and the JobAccepted event carries the confirmed arbiter;
+  passing address(0) confirms payer-as-arbiter on a no-arbiter job
+  and reverts on a job that has an arbiter. AgentEscrow bytecode
+  21,919 B. (Round 15: second gas measurement on the view with a
+  non-zero prior credit total — 387,382 gas, identical to the
+  pure-unsettled path, same 800,000 ceiling; NatSpec notes the
+  50-job figure was measured on eth-tester/PyEVM and will differ on
+  a real client; a check-order test pins that a non-agent with a
+  deliberately wrong arbiter still reverts only on "not agent"; the
+  README documents how an integrator reads the confirmed arbiter
+  (getJob + JobAccepted event); acceptJob gas pinned at 53,521 gas
+  under GAS_CEILING_ACCEPT_JOB 110,000.) (Round 16: the demo guard
+  now runs against live jobs and asserts the revert reason is "not
+  payer"; a randomized state-machine test (fixed seed 20261028, 60
+  steps, 25 succeeded / 35 reverted) asserts
+  settlementInvariant(...).holds after every step across three
+  tokens; withdraw / withdrawTo carry a comment stating why the
+  strict == is kept instead of the >= that _payOrCredit uses.)
   A failing payout
   leg credits a pull
   balance instead of stranding the job, and `MockUSDC` mint is
   owner-gated. The agent may never be the zero address (its own guard,
-  symmetric with the token check). 56 tests cover every new path,
+  symmetric with the token check). 71 tests cover every new path,
   including the previously untested ones (release while Disputed, both
   resolve directions, early timeout, cancel, window of 0, reentrancy
   through a hook token, cross-function reentrancy through a hook calling
