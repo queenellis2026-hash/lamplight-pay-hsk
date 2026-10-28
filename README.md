@@ -127,20 +127,22 @@ tests/
 demo-receipts/          quote + receipts produced by the demo run
 ```
 
-## Run it (verified Oct 26, 2026)
+## Run it (verified Oct 28, 2026)
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install web3 eth-tester py-solc-x py-evm pytest
-.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 21,918 B
+.venv/bin/python scripts/compile.py   # MockUSDC 3,882 B, AgentEscrow 21,919 B
 .venv/bin/python scripts/demo.py      # 3 scenarios, all pass
-.venv/bin/python -m pytest tests/ -v  # 70 passed
+.venv/bin/python -m pytest tests/ -v  # 71 passed
 ```
 
 Demo result (local EVM, real tx hashes in `demo-receipts/`):
 - **A — happy path:** 50 mUSDC job funded → accepted → delivered → released. Agent balance 50.0.
 - **B — timeout refund:** 20 mUSDC job, agent never delivers, payer reclaims after the deadline.
 - **C — dispute:** 30 mUSDC job delivered, payer disputes, resolves to the agent.
-- **Guard:** a stranger's `release()` call reverts.
+- **Guard:** a stranger's `release()` on a live Delivered job and a stranger's
+  `refund()` on a refundable job both revert on "not payer" — then both jobs
+  settle back to the payer.
 - Final balances: payer 9,920 / agent 80 / escrow 0 mUSDC. Escrow never keeps funds.
 
 ## HSK Chain (verified)
@@ -153,18 +155,19 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
 
 ## Status / honest limitations
 
-- **Testnet deployment DONE Oct 26, 2026 ~8:21 PM CDT.**
-  [AgentEscrow `0x6Fa3d30F854aCBd589E10D78e9531fB910759eb7`](https://testnet-explorer.hskchain.net/address/0x6Fa3d30F854aCBd589E10D78e9531fB910759eb7)
-  and [MockUSDC `0x860CadF955CF73FDB8E9ED2979104baae9f833B9`](https://testnet-explorer.hskchain.net/address/0x860CadF955CF73FDB8E9ED2979104baae9f833B9),
+- **Testnet deployment DONE Oct 28, 2026 ~1:14 AM CDT (round-16 contracts, redeployed; Blockscout-verified).**
+  [AgentEscrow `0xF1c84737AAc850546d84C54d60B3b18fF82F8afA`](https://testnet-explorer.hskchain.net/address/0xF1c84737AAc850546d84C54d60B3b18fF82F8afA)
+  and [MockUSDC `0x00835c4588461353B4B284437d7D65c466587375`](https://testnet-explorer.hskchain.net/address/0x00835c4588461353B4B284437d7D65c466587375),
   live on HSKChain Testnet (chain ID 133), recorded in
   `build/hsk-testnet-deployment.json`. The deploy script
   (`scripts/deploy_hsk_testnet.py`) checks the chain ID is 133 and takes a
   testnet-only deployer key from `DEPLOYER_KEY`. Honest note: no escrow
   transaction has run against the deployed contracts yet — the demo scenarios
   ran on a local EVM, so the on-chain history is the two deployments only.
-- **Demo video DONE Oct 26, 2026.** 28-second walkthrough
-  (`build/demo-video.mp4`), Unlisted on YouTube at
-  https://youtu.be/GdHNK0fZ0Lo.
+- **Demo video DONE Oct 28, 2026 (v4).** 2:05 narrated walkthrough
+  (`build/demo-video-v4.mp4`), Unlisted on YouTube at
+  https://youtu.be/6lGHXO1dEVM — the three demo scenarios plus the
+  round-16 guard checks, with the live round-16 testnet addresses.
 - **Submitted Oct 27, 2026 ~11:10 AM CDT.** DoraHacks Build
   https://dorahacks.io/build/50417, status Under Review, track Agent
   Payments & A2A Settlement. Mainnet deployment is still pending (rules:
@@ -196,122 +199,40 @@ Demo result (local EVM, real tx hashes in `demo-receipts/`):
   arbitrates during the window; a dispute may only be raised inside it; if
   the payer stays silent past it, the agent may call `release()` and claim;
   a disputed job must be resolved within the window + 7 days, after which
-  `settleDisputeTimeout()` releases to the agent. The window itself is
-  capped at `MAX_REVIEW_WINDOW` (30 days) in `createJob` — an uncapped
-  window would let a payer delay (or, near 2**256 − 1, overflow) the
-  agent's claim indefinitely; no floor is set, since a 0 window is a
-  legitimate payer choice (instant settlement). The agent's claim is
-  strict (`>`): at the exact boundary second the payer's dispute (`<=`)
-  still wins, so a last-second dispute can never lose a race to the
-  agent's release. `claimWindows()` returns the exact claim and
-  dispute-timeout timestamps so callers never re-compute them — and
-  before delivery it returns (0, 0), since the window offsets from 0
-  would look like 1970 timestamps that have already passed. Funding
-  stores what actually arrived (balance before/after, so fee-on-transfer
-  tokens cannot make the escrow insolvent), token moves use SafeERC20-style
-  calls (USDT-style no-bool tokens work) made in assembly with a 32-byte
-  output buffer, and the returndata is inspected with a bounded copy — a
-  token returning 32 bytes holding a non-bool value, a wrong-length
-  return, or huge returndata can never revert the payout or run it out
-  of gas on the copy; the payout is treated as failed and credited
-  instead. (Round 6: the bounded copy alone was NOT enough — the
-  high-level `token.call(...)` copied the full returndata first, so a
-  token returning ~3MB ran the settlement out of gas, proven by the
-  return-bomb test: pre-fix, release consumed all 30M gas and reverted.
-  The assembly call caps the copy at 32 bytes; post-fix the same release
-  costs 17,519,061 gas — the token's own cost to return 3MB — and the
-  payout credits. (Round 7: the fix is now pinned with gas-cost
-  assertions — a new test measures clean vs credited release gas on the
-  cold path and asserts ceilings of 150,000 gas for the small-return
-  paths and 19,000,000 for the bomb, so a future solc change cannot
-  silently regress the assembly call; the bomb test itself also asserts
-  gasUsed ≤ 19,000,000.) A `pendingCredit(token, account)` view (round 8)
-  gives front-ends the pull balance directly, and the gas ceilings are
-  now documented in the contract's NatSpec as a tripwire for future solc
-  upgrades. (Round 9: `_tryTransfer` now refuses a token whose code has
-  vanished after funding — a code-less address answers with empty
-  success, which the USDT-style rule would read as "paid"; a new
-  `VanishingToken` test token proves the release credits instead of
-  marking paid, run on a pre-Cancun (Shanghai) chain where SELFDESTRUCT
-  still deletes code. A gas-burning token mode (mode 5, infinite loop)
-  is pinned too: with a 20M gas limit the release costs 19,695,562 gas
-  and credits, with 200k it reverts — a front-end must not hardcode a
-  low gas limit. The `pendingCredit` test now uses fresh accounts so it
-  no longer depends on earlier tests having withdrawn.) (Round 10:
-  `_payOrCredit` — and `withdraw()` / `withdrawTo()` — now verify the
-  escrow's balance actually dropped by the payout amount, instead of
-  trusting the token's return value: a token that returns true while
-  moving nothing (new `MalformedReturnToken` mode 6, the lying token)
-  is caught and the payout is credited, never marked paid — proven by
-  a test that fails with the check removed. Only the shortfall is
-  credited, so the invariant holds: escrow balance == unsettled jobs +
-  pending credits, locked in by a dedicated invariant test. A
-  `jobWindows()` view returns (deliveredAt, agentClaimAt,
-  disputeTimeoutAt, credit) in one call. The gas ceilings are now
-  named constants in the tests, the mode-5 path has its own ceiling
-  (19,900,000; re-measured 19,697,418), and the exact boundary
-  semantics (strict > vs inclusive <=) are documented in the NatSpec
-  of release / raiseDispute / resolveDispute / settleDisputeTimeout.)
-  (Round 11: a `settlementInvariant(token)` view returns (balance,
-  unsettledSum, pendingCreditsSum, holds) so monitors can call the
-  balance equation on-chain instead of summing pull balances from
-  logs — backed by a new `totalPendingCredits` per-token total,
-  maintained wherever `pendingWithdrawals` is written; the
-  "tokens move the full amount or nothing" assumption the
-  shortfall arithmetic relies on is now stated in the contract's
-  top-level NatSpec; and a second cold-path gas pinning under a
-  non-zero prior credit (measured 67,784, ceiling
-  GAS_CEILING_COLD_PRIOR_CREDIT 140,000) catches a future
-  double-credit by its exact credit-sum assertions. The first
-  credited release now costs ~99k gas (one more cold SSTORE for
-  the per-token total), still well under GAS_CEILING_SMALL.)
-  (Round 12: a stray-funds test pins that a direct ERC-20 transfer
-  into the escrow — outside createJob — makes `holds` false while
-  the other three view values stay exactly correct, and the
-  NatSpec now states the O(jobCount) scan is intentional for
-  off-chain monitors.) (Round 13: the view's gas is pinned under a
-  realistic load — 50 jobs, measured 387,382 gas via
-  eth_estimateGas, ceiling GAS_CEILING_INVARIANT_VIEW 800,000 — so
-  a future compiler or storage-layout change that turns the view
-  expensive is caught; the NatSpec now notes a direct transfer is
-  the only intended way `holds` becomes false, and the off-chain
-  recipe for the unsettled sum alone is documented.) (Round 14:
-  agent-side arbiter confirmation at acceptJob — the agent passes
-  the arbiter it expects, the call reverts "arbiter mismatch" on a
-  mismatch, and the JobAccepted event carries the confirmed arbiter;
-  passing address(0) confirms payer-as-arbiter on a no-arbiter job
-  and reverts on a job that has an arbiter. AgentEscrow bytecode
-  21,919 B. (Round 15: second gas measurement on the view with a
-  non-zero prior credit total — 387,382 gas, identical to the
-  pure-unsettled path, same 800,000 ceiling; NatSpec notes the
-  50-job figure was measured on eth-tester/PyEVM and will differ on
-  a real client; a check-order test pins that a non-agent with a
-  deliberately wrong arbiter still reverts only on "not agent"; the
-  README documents how an integrator reads the confirmed arbiter
-  (getJob + JobAccepted event); acceptJob gas pinned at 53,521 gas
-  under GAS_CEILING_ACCEPT_JOB 110,000.) (Round 16: the demo guard
-  now runs against live jobs and asserts the revert reason is "not
-  payer"; a randomized state-machine test (fixed seed 20261028, 60
-  steps, 25 succeeded / 35 reverted) asserts
-  settlementInvariant(...).holds after every step across three
-  tokens; withdraw / withdrawTo carry a comment stating why the
-  strict == is kept instead of the >= that _payOrCredit uses.)
-  A failing payout
-  leg credits a pull
-  balance instead of stranding the job, and `MockUSDC` mint is
-  owner-gated. The agent may never be the zero address (its own guard,
-  symmetric with the token check). 71 tests cover every new path,
-  including the previously untested ones (release while Disputed, both
-  resolve directions, early timeout, cancel, window of 0, reentrancy
-  through a hook token, cross-function reentrancy through a hook calling
-  raiseDispute or acceptJob, and malformed-return tokens in all three
-  shapes plus the 3,000,000-byte return bomb, the gas-burning token,
-  the vanished-code token, and the lying token — returns true, moves
-  nothing, caught by the balance-delta check).
-  Full verbatim findings: `reviews-2026-10-27.md`. Note: the
-  contracts deployed on HSK testnet (above) are the PRE-fix version —
-  redeploy is needed before demo selection for the on-chain code to match
-  this source.
+  `settleDisputeTimeout()` releases to the agent. The window is capped at
+  `MAX_REVIEW_WINDOW` (30 days); no floor — a 0 window is a legitimate
+  payer choice (instant settlement). The agent's claim is strict (`>`):
+  at the exact boundary second the payer's dispute (`<=`) still wins.
+  `claimWindows()` returns the exact claim and dispute-timeout timestamps
+  (0, 0 before delivery). `jobWindows()` returns (deliveredAt,
+  agentClaimAt, disputeTimeoutAt, credit) in one call.
+- **Hostile-token handling.** Funding stores what actually arrived
+  (balance before/after), so fee-on-transfer tokens cannot make the escrow
+  insolvent. Token moves use assembly calls with a 32-byte bounded copy, so
+  a token returning a non-bool value, a wrong-length return, or huge
+  returndata can never revert the payout or run it out of gas on the copy.
+  A failing payout leg credits a pull balance instead of stranding the job
+  (fee, no-bool, blocklist, malformed-return, 3,000,000-byte return-bomb,
+  gas-burning, vanished-code, and lying tokens are all covered by tests).
+  `_payOrCredit` — and `withdraw()` / `withdrawTo()` — verify the escrow's
+  balance actually dropped by the payout amount, so a token that returns
+  true while moving nothing is caught and credited, never marked paid;
+  only the shortfall is credited. A `pendingCredit(token, account)` view
+  exposes pull balances directly. `MockUSDC` mint is owner-gated. The
+  agent may never be the zero address.
+- **Settlement invariant, on-chain.** `settlementInvariant(token)` returns
+  (balance, unsettledSum, pendingCreditsSum, holds) so monitors can check
+  the balance equation on-chain: escrow balance == unsettled jobs +
+  pending credits. A direct ERC-20 transfer into the escrow (outside
+  createJob) is the only intended way `holds` becomes false. A randomized
+  state-machine test (fixed seed 20261028, 60 steps) asserts the invariant
+  holds after every step across three tokens. Gas ceilings are pinned as
+  test constants and documented in NatSpec as a tripwire for future solc
+  upgrades (invariant view 387,382 gas under an 800,000 ceiling at 50
+  jobs; acceptJob 53,521 under 110,000; return-bomb 19,000,000;
+  gas-burning path 19,900,000).
+- **Tests: 71**, covering every path above (see Repo layout). Full round
+  history: `STATUS.md` and `reviews-2026-10-27.md`.
 - **Eligibility verified:** the hackathon is **online and global**. The
   organiser's Eventbrite listing says "Online event", "An online hackathon in
   India", and "inviting global developers". "Mumbai Edition" is branding, not a
