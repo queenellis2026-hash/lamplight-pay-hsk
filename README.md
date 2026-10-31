@@ -124,10 +124,10 @@ app/            live user journey UI (single page, served via GitHub Pages)
 
 ## Honest limitations
 
-- **Testnet only. Mainnet readiness is NOT established.** No external audit,
-  no formal verification, no mainnet deployment. Mainnet deployment is also
-  what the hackathon rules require for demo-selection eligibility and for
-  claiming a prize — it waits on funds for gas.
+- **Mainnet live since Oct 30, 2026 — no external audit, no formal verification.**
+  Deployed to HSK Chain Mainnet (chain 177); demo job completed the same day.
+  The hackathon's demo-selection and prize-eligibility requirement (mainnet
+  deployment) is met.
 - **No HSP integration yet.** The track is defined around HSP's Payment
   Mandate / Gateway flow; this escrow maps to it (quote = mandate, release =
   verify-and-execute, receipt = settlement proof) and the HSP docs are linked

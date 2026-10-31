@@ -14,10 +14,10 @@ Settlement.
 ## Deployment (HSKChain Testnet, chain ID 133)
 - [AgentEscrow `0xAB70612F45d9cf914D129b0DB71DE243dD55813C`](https://testnet-explorer.hskchain.net/address/0xAB70612F45d9cf914D129b0DB71DE243dD55813C) — deployed Oct 28, 2026, round-19+20 code, block 35016779, Blockscout-verified (partial match).
 - [MockUSDC `0xEF346652eeB233662E7d290d222175895d53ef15`](https://testnet-explorer.hskchain.net/address/0xEF346652eeB233662E7d290d222175895d53ef15) — deployed Oct 28, 2026, block 35016778, Blockscout-verified (partial match).
-- Deployer: `0x995646c5270f26a8D64df58D7bc7e8277c606e27` (testnet-only, fresh key; funded 0.1 tHSK from the testnet faucet). Previous deployment (Oct 28, 2026 ~1:14 AM CDT, round-16 code): AgentEscrow `0xF1c84737AAc850546d84C54d60B3b18fF82F8afA` ([tx](https://testnet-explorer.hskchain.net/tx/2ab7754a91670e4f21deef9280f6d3353803b7aee639f9114b78cb821ef94b12)), MockUSDC `0x00835c4588461353B4B284437d7D65c466587375` ([tx](https://testnet-explorer.hskchain.net/tx/b0a3961840adfee33fe9352710ebac1e8e30c5467f8dc7c98c3696f8e95d913f)) — superseded by the round-19 redeploy. Earlier deployment (Oct 26, 2026): AgentEscrow `0x6Fa3d30F854aCBd589E10D78e9531fB910759eb7` ([tx](https://testnet-explorer.hskchain.net/tx/59069c0957ea521c47bbc79fc22d9f3de4df8916c611b4b8c4a41e28f4a74f7c)), MockUSDC `0x860CadF955CF73FDB8E9ED2979104baae9f833B9` ([tx](https://testnet-explorer.hskchain.net/tx/2ea7242b072fd7348b619f279e66a9c531792a4e99b8d835a8a073989191b4a7)), deployer `0xa67d284fC85345c2e3aCC3A34d46f93a295df341` — superseded by the Oct 28 redeploy.
+- Deployer: `0x995646c5270f26a8D64df58D7bc7e8277c606e27` (testnet-only, fresh key; funded 0.1 tHSK from the testnet faucet). Previous deployment (Oct 28, 2026 ~1:14 AM CDT, round-16 code): AgentEscrow `0xF1c84737AAc850546d84C54d60B3b18fF82F8afA` ([tx](https://testnet-explorer.hskchain.net/tx/2ab7754a91670e4f21deef9280f6d3353803b7aee639f9114b78cb821ef94b12)), MockUSDC `0x00835c4588461353B4B284437d7D65c466587375` ([tx](https://testnet-explorer.hskchain.net/tx/b0a3961840adfee33fe9352710ebac1e8e30c5467f8dc7c98c3696f8e95d913f)) — superseded by the round-19 redeploy. Earlier deployment (Oct 26, 2026): AgentEscrow `0x6Fa3d30F854aCBd589E10D78e9531fB910759eb7` ([tx](https://testnet-explorer.hskchain.net/tx/59069c0957ea521c47bbc79fc22d9f3de4df8916c611b4b8c4a41e28f4a74f7c)), MockUSDC `0x860CadF955CF73FDB8E9ED2979104baae9f833B9` ([tx](https://testnet-explorer.hskchain.net/tx/2ea7242b072fd7348b619f279e66a9c531792a4e99b8d835a8a073989191b4a7)), deployer `[personal wallet redacted]` — superseded by the Oct 28 redeploy.
 - Demo scenarios: 3/3 pass on a local EVM; `pytest` 85 passed (79 flow + 6 deploy-script). Live testnet demo on the round-19 contracts: flows A/B/C + stranger guards pass, escrow ends at 0. Receipts in `demo-receipts/`.
 - Demo video: v4, 2:05, Unlisted — https://youtu.be/6lGHXO1dEVM.
-- Submitted Oct 27, 2026: https://dorahacks.io/build/50417 — status Under Review. The Build can still be edited before judging. (Build edited Oct 28, 2026 with the new addresses + v4 video, verified live.)
+- Submitted Oct 27, 2026: https://dorahacks.io/build/50417 — status Under Review. The Build can still be edited before judging. (Build edited Oct 28, 2026 with the new addresses + v4 video, verified live. Build edited Oct 31, 2026 with mainnet addresses + v5 video: https://youtu.be/ml2tS2KO_zk.)
 - Update (Oct 28, 2026): rounds 11–16 pushed Oct 28 ~01:09 AM CDT (head 6022bcb2); redeploy done Oct 28 ~1:14 AM CDT. The 'no push / PRE-fix deployment' notes in the round 11–15 sections below are superseded by that push. Rounds 17–21 + journey UI + threat model pushed Oct 28, 2026 (see Round-19 section at the end).
 
 ## Post-review fix (Oct 27, 2026)
@@ -134,9 +134,8 @@ no HSP code runs in this build yet.
 
 ## Known gaps
 
-- Testnet-only. Rules: no mainnet deployment forfeits demo selection, and
-  winners must be on mainnet to claim the prize. Mainnet deploy waits on
-  funds; planned before demo selection Nov 3 if possible.
+- Mainnet deployed Oct 30, 2026 (see Mainnet deployment section at the end).
+  Remaining: no external audit, no formal verification.
 - Live escrow transactions have run against the deployed round-19 contracts
   (flows A/B/C + stranger guards, escrow ends at 0 — see Round-19 section
   at the end). The v4 demo video still shows the round-16 addresses; a
@@ -823,7 +822,7 @@ source change).
 - Fresh deployer: 0x995646c5270f26a8D64df58D7bc7e8277c606e27. Key at
   ~/.hsk-testnet-deployer (mode 0600, testnet-only). NEVER the Ellis
   main wallet key. The OLD deployer
-  (0xa67d284fC85345c2e3aCC3A34d46f93a295df341) still holds 0.0962 tHSK
+  ([personal wallet redacted]) still holds 0.0962 tHSK
   but was NOT reused.
 - NEW ADDRESSES (round 16, verified on Blockscout — "Pass - Verified"):
   MockUSDC 0x00835c4588461353B4B284437d7D65c466587375
@@ -856,7 +855,7 @@ source change).
   POSTs to the Blockscout API were refused (403, then dropped
   connections); forge's submission went through and both returned
   "Pass - Verified".
-- DONE Oct 28, 2026: DoraHacks Build 50417 edited with the new addresses + v4 video, verified live. Do NOT touch the old deployed contracts.
+- DONE Oct 28, 2026: DoraHacks Build 50417 edited with the new addresses + v4 video, verified live. The Oct 28 testnet contracts are superseded; the canonical deployment is the Oct 30 mainnet (see Mainnet deployment section).
 
 ## Deploy-script fix — Oct 28, 2026 (night) — DONE, local only, no redeploy
 - Both Redeploy bugs fixed in scripts/deploy_hsk_testnet.py (no live
@@ -973,7 +972,28 @@ source change).
   stated honestly, accepted limitations, evidence.
 - Reviews for this code: Claude round-17 SOUND (1 Low, docs only,
   fixed in round 18); ChatGPT round-18 SOUND (2 Low, fixed in round
-  19); ChatGPT final-version review SOUND, no findings (testnet
-  only — mainnet readiness NOT established). Stateful/fuzz invariant
-  testing and a fresh demo video on the round-19 deployment are
-  still owed.
+  19); ChatGPT final-version review SOUND, no findings. Stateful/fuzz invariant
+  testing still owed; mainnet deployed Oct 30, 2026 (see Mainnet deployment
+  section at the end).
+
+## Mainnet deployment — DONE Oct 30, 2026
+
+Deployed to HSK Chain Mainnet (chain ID 177) via forge, 6M gas
+(the 3M script limit failed):
+- AgentEscrow `0x59b657823460f764976bC9E7A59048750DF43a82`
+- MockUSDC `0x18dFce8272F6C2d7474BbC4BE141A99E38554cea`
+- Deployer funded with 10 HSK; deploy spent ~4.43 HSK.
+
+Live mainnet demo (Oct 30 ~9:55 AM CDT): Job 2 created → accepted →
+delivered → released; agent paid 50.0 mUSDC on-chain. Settlement
+invariant holds (escrow 0, unsettled 0, pending credits 0).
+
+Stranded-job sweep (Oct 31): Jobs 0 and 1 (50 mUSDC each, deadlines
+expired Oct 30) refunded via `refundAfterDeadline` — 100 mUSDC
+recovered to the deployer. Both jobs now in Refunded state; Job 2
+untouched.
+
+DoraHacks Build 50417 updated Oct 31 with mainnet addresses and the
+v5 demo video (https://youtu.be/ml2tS2KO_zk). Older demo videos
+(v4 and earlier) removed from the channel; v5 is the single current
+demo video.

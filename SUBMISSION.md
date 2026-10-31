@@ -5,7 +5,7 @@
 **Track:** Agent Payments & A2A Settlement ($5,000 USDT)
 **Deadline:** Nov 1, 2026, 21:30 IST (Nov 2, 00:00 Beijing) · Demo Day Nov 4 · Winners Nov 5
 **Team:** Ellis Lamplight (solo) — queenellis2026@gmail.com · GitHub: queenellis2026-hash · X: @EllisLamplight
-**Status: SUBMITTED Oct 27, 2026 — Build https://dorahacks.io/build/50417, Under Review. Edit in progress per the Oct 27 top-to-bottom review.**
+**Status: SUBMITTED Oct 27, 2026 — Build https://dorahacks.io/build/50417, Under Review. Updated Oct 31, 2026 (mainnet addresses, v5 demo video).**
 
 ## Project name
 
@@ -40,16 +40,20 @@ Built and tested end-to-end on a local EVM: happy-path release, timeout refund,
 dispute resolved to the agent, and a guard proving a stranger cannot release
 funds. Final escrow balance: zero — the contract never keeps funds.
 
-Deployed live on HSKChain Testnet (chain ID 133, Oct 26, 2026):
+Deployed live on HSK Chain Mainnet (chain ID 177, Oct 30, 2026):
+- AgentEscrow `0x59b657823460f764976bC9E7A59048750DF43a82`
+- MockUSDC `0x18dFce8272F6C2d7474BbC4BE141A99E38554cea`
+- Live demo Oct 30: Job 2 created → accepted → delivered → released; agent paid 50 mUSDC on-chain.
+
+Earlier testnet deployment (chain ID 133, Oct 26, 2026, superseded):
 - [AgentEscrow 0x6Fa3d30F854aCBd589E10D78e9531fB910759eb7](https://testnet-explorer.hskchain.net/address/0x6Fa3d30F854aCBd589E10D78e9531fB910759eb7) ([deployment tx](https://testnet-explorer.hskchain.net/tx/59069c0957ea521c47bbc79fc22d9f3de4df8916c611b4b8c4a41e28f4a74f7c))
 - [MockUSDC 0x860CadF955CF73FDB8E9ED2979104baae9f833B9](https://testnet-explorer.hskchain.net/address/0x860CadF955CF73FDB8E9ED2979104baae9f833B9) ([deployment tx](https://testnet-explorer.hskchain.net/tx/2ea7242b072fd7348b619f279e66a9c531792a4e99b8d835a8a073989191b4a7))
-- Deployer: 0xa67d284fC85345c2e3aCC3A34d46f93a295df341 (funded 0.1 tHSK from the testnet faucet)
-- Honest note: no escrow transaction has run against the deployed contracts yet — the demo scenarios ran on a local EVM, so the on-chain history is the two deployments only.
+- Deployer: [personal wallet redacted] (funded 0.1 tHSK from the testnet faucet)
 
 HSP (HashKey Settlement Protocol): this track is defined around HSP — the Payment Agent constructs a Payment Mandate and HSP's Gateway verifies and executes the on-chain payment ([HSP API docs](https://hashkey-merchant.github.io/#/)). Lamplight Pay maps directly: the quote is the Payment Mandate, the escrow release is the Gateway's verify-and-execute step, and the receipt is the settlement proof. The HSP sandbox is not live yet, so no HSP code runs in this build — the mapping is documented here and the integration follows when sandbox access is available.
 
 No real funds move in this build. The demo uses a clearly-labelled test token
-(MockUSDC) and the deployment above is on the HSK testnet.
+(MockUSDC) on HSK Chain Mainnet.
 
 ## Why HSK Chain
 
@@ -74,15 +78,11 @@ solcx (compilation). HSKChain Testnet (chain ID 133) for deployment.
 
 ## Blockers before this can be submitted
 
-1. ~~Public GitHub repo~~ — DONE Oct 26, 2026 (public, pushed, verified live).
-2. ~~HSK testnet deployment~~ — DONE Oct 26, 2026 ~8:21 PM CDT (both contracts live, code verified on-chain).
-3. ~~Demo video~~ — DONE Oct 26, 2026 (`build/demo-video.mp4`, 28s), Unlisted on YouTube at https://youtu.be/GdHNK0fZ0Lo. NOTE: the form treats video as OPTIONAL (YouTube link button, no `*`). A narrated 2–3 min re-record is planned.
-4. ~~DoraHacks form check~~ — DONE Oct 26, 2026 ~8:28 PM CDT (browser, read-only, nothing created/submitted). Two-step flow: (a) Create a Build (name, tagline, tags, team info, links incl. GitHub Repo / Video / Website / X / LinkedIn / Other, Markdown description, private contact info), (b) Build Submission modal (Build * + Track * + teammates Yes/No + terms checkbox). No field carries `*` on the Build form itself; no character limits shown; NO contract-address field (put addresses in the description); NO email field. Contact info dialog requires Telegram (primary, `*`) + a backup (Discord / WhatsApp / WeChat, `*`).
-5. **MAINNET REQUIREMENT — CONFIRMED by exact-quote re-check Oct 26 ~9:08 PM CDT:** "Make sure you deploy your smart contract on HSK Chain mainnet, projects that have not completed deployment will be automatically deemed to have forfeited their eligibility for demo selection." Plus separately: winners must be on mainnet to claim the prize. Our deployment is testnet-only. A mainnet deploy needs real HSK for gas — a real-money step requiring approval first. Testnet-only submission may still be accepted by the form but forfeits demo selection.
-8. **HSP NUANCE — exact-quote re-check Oct 26 ~9:08 PM CDT:** HSP is NOT a hard requirement (rules never say "required"/"must" for it; exact line: "For the Agent Payments & A2A Settlement track, please use HSP"). BUT the track topic is defined around HSP's API (Payment Agent builds a Payment Mandate, wallet signature, verified/executed through HSP's Gateway) — a project not using HSP arguably doesn't match the track topic. Our escrow does not use HSP. Risk: judges may score it off-topic. Video NOT required anywhere (optional YouTube link button only).
-6. ~~Telegram contact~~ — DONE Oct 26, 2026: **@EllisLamplight**. ~~Backup contact~~ — DONE Oct 26, 2026: WhatsApp "Ellis Lamplight".
+All resolved: public GitHub repo (Oct 26), HSK testnet deployment (Oct 26),
+demo video (Oct 26, superseded by v5 Oct 31), DoraHacks form check (Oct 26),
+Telegram/WhatsApp contacts (Oct 26), mainnet deployment (Oct 30 — see above).
 - **Team name: Ellis Lamplight (solo); the project is Lamplight Pay.**
-7. **Mainnet plan:** submit the testnet Build now; deploy to mainnet when funds are available, ideally before demo selection Nov 3, then update the Build with the mainnet addresses. **RISK — edit-after-creation NOT confirmed (re-check Oct 26 ~9:08 PM CDT):** no Edit option found in the rules or Builds tab; one public Build shows "Updated 12 hours ago" (updates exist) but an owner editing after submitting to this hackathon is unconfirmed. Safer path is mainnet deployed BEFORE submitting, if funds allow. Mainnet RPC verified reachable (chain 177); deploy script still to be written.
+- **HSP NUANCE — exact-quote re-check Oct 26 ~9:08 PM CDT:** HSP is NOT a hard requirement (rules never say "required"/"must" for it; exact line: "For the Agent Payments & A2A Settlement track, please use HSP"). BUT the track topic is defined around HSP's API (Payment Agent builds a Payment Mandate, wallet signature, verified/executed through HSP's Gateway) — a project not using HSP arguably doesn't match the track topic. Our escrow does not use HSP. Risk: judges may score it off-topic. Video NOT required anywhere (optional YouTube link button only).
 
 ## Honest limitations (stated in the submission, not hidden)
 

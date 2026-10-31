@@ -1,8 +1,8 @@
 # Lamplight Pay — Threat Model
 
 **Contract:** `AgentEscrow` (+ `MockUSDC` test token), as deployed on HSK
-Chain Testnet (chain 133) — see *Evidence* at the end for the
-deployment, verification, and test record this document rests on.
+Chain Mainnet (chain 177) — see *Evidence* at the end for the
+deployment, verification, and test record this document rests on. (Earlier testnet deployment: chain 133.)
 **Scope:** the escrow contract only. No front end, no off-chain
 quote service, and no token contract beyond `MockUSDC` is in scope
 here. Everything below is grounded in the deployed source and the

@@ -810,7 +810,7 @@ def test_create_job_hook_sees_documented_false_window(env):
 
 
 def test_withdraw_to_hook_sees_true_invariant(env):
-    """ROUND 21 (Chris delta improvement 1): mirror of the withdraw
+    """ROUND 21 (delta improvement 1): mirror of the withdraw
     hook test for withdrawTo(). Only withdraw() was exercised before,
     but round 19 edited both functions — a recipient callback firing
     mid-withdrawTo must also see settlementInvariant hold."""
@@ -839,7 +839,7 @@ def test_withdraw_to_hook_sees_true_invariant(env):
 
 
 def test_failed_withdrawal_leaves_totals_unchanged(env):
-    """ROUND 21 (Chris delta improvement 2): the atomicity test for
+    """ROUND 21 (delta improvement 2): the atomicity test for
     the round-19 reorder. A FAILED withdrawal must leave
     pendingWithdrawals and totalPendingCredits exactly as they were
     — the "revert restores everything" argument is the whole safety
