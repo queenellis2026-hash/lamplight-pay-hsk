@@ -35,6 +35,17 @@ pulls it with `withdraw()` or `withdrawTo()`.
 
 ## Live deployment
 
+**HSKChain Mainnet, chain ID 177** — deployed Oct 30, 2026. A live demo job
+ran end-to-end on mainnet the same day (fund → accept → deliver → release,
+agent paid 50 mUSDC).
+
+- AgentEscrow
+  [`0x59b657823460f764976bC9E7A59048750DF43a82`](https://hsk.blockscout.com/address/0x59b657823460f764976bC9E7A59048750DF43a82)
+- MockUSDC (test token, 6 decimals)
+  [`0x18dFce8272F6C2d7474BbC4BE141A99E38554cea`](https://hsk.blockscout.com/address/0x18dFce8272F6C2d7474BbC4BE141A99E38554cea)
+
+Deployment record: `build/hsk-mainnet-deployment.json`.
+
 HSKChain Testnet, chain ID **133**, RPC https://testnet.hsk.xyz, explorer
 https://testnet-explorer.hskchain.net. Both contracts are Blockscout-verified
 (partial match — the deployed bytecode was compiled from the same code before
@@ -46,8 +57,9 @@ a comment-only note was added to the source; see the build-pinning record in
 - MockUSDC (test token, 6 decimals)
   [`0xEF346652eeB233662E7d290d222175895d53ef15`](https://testnet-explorer.hskchain.net/address/0xEF346652eeB233662E7d290d222175895d53ef15)
 
-Deployment and build-pinning records: `build/hsk-testnet-deployment-round19.json`
-and `build/hsk-testnet-deployment-round19-pinning.json`. Earlier testnet
+Testnet deployment and build-pinning records:
+`build/hsk-testnet-deployment-round19.json` and
+`build/hsk-testnet-deployment-round19-pinning.json`. Earlier testnet
 deployments are superseded by this one.
 
 ## Try it live

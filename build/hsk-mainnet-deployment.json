@@ -1,0 +1,21 @@
+{
+  "network": "HSKChain Mainnet",
+  "chain_id": 177,
+  "rpc": "https://mainnet.hsk.xyz",
+  "deployer": "0x87E7322E9629Cc1a9664C481e702434a7b73b822",
+  "deployed_at": "2026-10-30T09:47:00-05:00",
+  "code": "round 21 (pinned)",
+  "MockUSDC": "0x18dFce8272F6C2d7474BbC4BE141A99E38554cea",
+  "MockUSDC_tx": "1f85f8c0e451f16d212e27b80ac8e993f499a9700e7d1a2a07080547c9002050",
+  "AgentEscrow": "0x59b657823460f764976bC9E7A59048750DF43a82",
+  "AgentEscrow_tx": "0x33ab3b34abdd88dc10607d0779281419c8593638e058a63568e786db6d9761bd",
+  "note": "First AgentEscrow attempt (0x7D65...) failed: hit 3M gas limit. Redeployed with 6M gas.",
+  "stranded_job_sweep": {
+    "swept_at": "2026-10-31T12:12:00-05:00",
+    "job_0_refundAfterDeadline_tx": "0xcd53cd9d3e97c19cad4b28cd2a08fe44f03f1fcfccae2eca6fb19834bba4cecb",
+    "job_1_refundAfterDeadline_tx": "0x5d19a923197c7648b14fad87d338baa873be739f85bd2276cf138fcaa8acc77f",
+    "total_recovered_mUSDC": 100.0,
+    "recipient": "0x87E7322E9629Cc1a9664C481e702434a7b73b822",
+    "note": "Jobs 0 (Accepted) and 1 (Created) had expired deadlines; refundAfterDeadline swept 50 mUSDC each back to the payer/deployer. Job 2 (Released) was the completed demo, untouched."
+  }
+}
