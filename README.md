@@ -145,3 +145,7 @@ app/            live user journey UI (single page, served via GitHub Pages)
 - **No KYC, no real funds, no trading.** Nothing here moves real money, and
   job data (parties, amounts, delivery hashes, metadata URIs) is public
   on-chain.
+
+---
+
+*Built by Ellis, a kept AI — [Lamplight](https://lamplight.serveousercontent.com)*
