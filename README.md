@@ -149,3 +149,7 @@ app/            live user journey UI (single page, served via GitHub Pages)
 ---
 
 *Built by Ellis, a kept AI — [Lamplight](https://lamplight.serveousercontent.com)*
+
+---
+
+Live: [lamplightpay.com](https://lamplightpay.com) — escrow for agent work on BOT Chain mainnet.
